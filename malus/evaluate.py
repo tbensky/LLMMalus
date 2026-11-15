@@ -95,24 +95,9 @@ def compile_formula(text: str, variables: tuple[str, ...] = ("A", "B", "C")) -> 
     return evaluate
 
 
-def score_formula(formula: str, apparatus: Apparatus, *, points: int = 40,
-                  samples: int = 3, seed: int | None = None,
-                  threshold: float = 0.05) -> dict[str, Any]:
-    """Compare the formula with `points` fresh readings at random settings.
-
-    The score is the normalized RMS error: RMS(predicted - measured) divided
-    by the range of the measured voltages. `discovered` is nrmse <= threshold;
-    the default 5% passes a correct law with fitted constants and fails a
-    wrong functional form (cos instead of cos^2, a missing knob...).
-    """
-    result: dict[str, Any] = {"formula": formula, "normalized": normalize_formula(formula),
-                              "threshold": threshold, "discovered": False}
-    try:
-        law = compile_formula(formula, tuple(k.name for k in apparatus.knobs))
-    except FormulaError as exc:
-        result["error"] = str(exc)
-        return result
-
+def collect_holdout(apparatus: Apparatus, *, points: int = 40, samples: int = 3,
+                    seed: int | None = None) -> list[dict[str, float]]:
+    """Fresh readings at random knob settings the model never chose."""
     rng = random.Random(seed)
     rows = []
     for _ in range(points):
@@ -123,15 +108,47 @@ def score_formula(formula: str, apparatus: Apparatus, *, points: int = 40,
             settings[spec.name] = round(rng.uniform(low, high), 2)
             apparatus.set_knob(spec.name, settings[spec.name])
         measured = statistics.fmean(apparatus.read_signal() for _ in range(samples))
+        rows.append({**settings, "measured": measured})
+    return rows
+
+
+def score_formula(formula: str, apparatus: Apparatus, *, points: int = 40,
+                  samples: int = 3, seed: int | None = None,
+                  threshold: float = 0.05,
+                  holdout: list[dict[str, float]] | None = None) -> dict[str, Any]:
+    """Compare the formula with `points` fresh readings at random settings.
+
+    The score is the normalized RMS error: RMS(predicted - measured) divided
+    by the range of the measured voltages. `discovered` is nrmse <= threshold;
+    the default 5% passes a correct law with fitted constants and fails a
+    wrong functional form (cos instead of cos^2, a missing knob...).
+
+    Pass `holdout` (from collect_holdout) to score several formulas against
+    the same readings without measuring again.
+    """
+    knob_names = tuple(k.name for k in apparatus.knobs)
+    result: dict[str, Any] = {"formula": formula, "normalized": normalize_formula(formula),
+                              "threshold": threshold, "discovered": False}
+    try:
+        law = compile_formula(formula, knob_names)
+    except FormulaError as exc:
+        result["error"] = str(exc)
+        return result
+    if holdout is None:
+        holdout = collect_holdout(apparatus, points=points, samples=samples, seed=seed)
+
+    rows = []
+    for reading in holdout:
+        settings = {k: reading[k] for k in knob_names}
         try:
-            predicted = law(*[settings[k.name] for k in apparatus.knobs])
+            predicted = law(*[settings[k] for k in knob_names])
             if not math.isfinite(predicted):
                 raise ValueError("not a finite number")
         except (ArithmeticError, ValueError, TypeError) as exc:
             result["error"] = f"The formula failed at {settings}: {exc}"
             result["points"] = rows
             return result
-        rows.append({**settings, "measured": measured, "predicted": predicted})
+        rows.append({**settings, "measured": reading["measured"], "predicted": predicted})
 
     measured = [r["measured"] for r in rows]
     residuals = [r["predicted"] - r["measured"] for r in rows]

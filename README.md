@@ -37,9 +37,11 @@ python3 run_lab.py --provider ollama --model qwen3:8b --runs 10
 `--provider` can be `nrp`, `openai` or `deepseek` (any OpenAI-compatible
 `/v1/chat/completions` endpoint; give `--llm-url` for others) or `ollama` (native
 `/api/chat` on `localhost:11434`). `LLM_PROVIDER`, `LLM_URL`, `LLM_MODEL` and
-`LLM_API_KEY` set the defaults. The model must support tool calling; if it writes
-a tool call as JSON in plain text instead, that is accepted too and counted in
-`text_tool_calls`.
+`LLM_API_KEY` set the defaults. The model must support tool calling. Calls a model
+writes as text instead are accepted too and counted in `text_tool_calls`: a call
+written out as JSON, just a tool's arguments (gpt-oss handed in `finish`'s
+`{"conclusion": ..., "formula": ...}` this way), or gpt-oss's own
+`to=functions.read_voltage` syntax leaking through the host.
 
 ## The tools
 
@@ -49,11 +51,38 @@ a tool call as JSON in plain text instead, that is accepted too and counted in
 | `read_voltage` | Read the voltage at the current settings, optionally averaging up to 20 readings. |
 | `write_down` | Add an entry to the lab notebook. |
 | `read_notebook` | Read back every notebook entry. |
+| `plot` | Graph its measured voltages against one knob, with the other knobs at given settings, and optionally its own curve. Saves a PNG and answers with each point next to the curve's value. |
 | `finish` | Announce it is done, with a written conclusion and the law as a Python expression in A, B and C. |
 
 The tool descriptions say "knob" and "voltage", never light or polarizers. To see
-exactly what the model reads, look at the top of `malus/tools.py` and at
-`prompts/system.txt` and `prompts/task.txt` (edit those to change the wording).
+exactly what the model reads, look at the top of `malus/tools.py` and the files in
+`prompts/` (edit those to change the wording).
+
+## The finish line: systematic data and a hand fit
+
+The model's **first** `finish` is taken to mean "I understand the knobs". Its law
+at that moment is recorded (`initial_formula`), and instead of ending, the harness
+answers with `prompts/fit_request.txt`: take a systematic set of data, fit the
+law to it **by hand** (choose the constants, plot, look, adjust, plot again; no
+automatic fitting), record the constants, then call `finish` again.
+
+- **The model never runs code.** `plot` is drawn by the harness: the model
+  chooses the data set (which knob on the x-axis, where the others were held)
+  and its curve with its hand-picked constants.
+- **Only real data is plotted.** The points come from the lab's own record of
+  `read_voltage` results, never from numbers the model types in.
+- **It gets a table back.** A text-only model cannot look at the PNG, so `plot`
+  answers with each data point next to the curve's value and the RMS difference.
+  That table is its view of the graph when it adjusts its constants.
+- **When finish is accepted:** a second `finish` is accepted once at least one
+  new plot exists. After three finishes without a plot it is accepted anyway
+  (`fit_stage: skipped`), so a stubborn model cannot loop forever.
+- **Both laws are scored:** the first law and the final hand-fitted law are
+  scored against the same fresh readings, so a run shows whether it understood
+  the knobs and whether its fit held up.
+
+`--no-fit-stage` turns this off (the first `finish` ends the run), and
+`--fit-request-file` points at different wording.
 
 ## What a run produces
 
@@ -61,7 +90,9 @@ exactly what the model reads, look at the top of `malus/tools.py` and at
 Runs/<model>/001/transcript.jsonl   every message, tool call and result
                  measurements.csv   every reading it took, with the knob settings
                  notebook.md        what it wrote down (also notebook.jsonl)
-                 summary.json       outcome, its conclusion and law, the check
+                 plots/plot_01.png  each graph it made (plots.jsonl has the data and curve)
+                 summary.json       outcome, its first and final law, both checks,
+                                    and the exact prompts it saw
 Runs/<model>/002/...
 Runs/<model>/runs_summary.json      how many runs found the law
 ```
@@ -75,11 +106,15 @@ settings. The score is the RMS error divided by the range of the readings; 5% or
 less counts as found (`--threshold`). A correct law with fitted constants passes
 easily; cos instead of cos^2, or a law that ignores a knob, fails.
 
-Run statuses: `finished` (it called finish), `call_limit` (hit `--max-calls`,
-default 150), `no_tool_calls` (five replies in a row without using a tool),
-`error` (the endpoint kept failing) and `interrupted` (Ctrl-C).
-`runs_summary.json` gives `discovered` out of `judged` runs, where judged leaves
-out `error` and `interrupted`.
+Run statuses: `finished` (its final finish was accepted), `call_limit` (hit
+`--max-calls`, default 250), `no_tool_calls` (five replies in a row without using
+a tool), `error` (the endpoint kept failing) and `interrupted` (Ctrl-C).
+`fit_stage` in each summary is `done`, `skipped`, `requested` (asked for the fit
+but never finished again), `not_reached` (never called finish) or `off`.
+
+`runs_summary.json` gives `discovered` (the final law passed) out of `judged`
+runs, where judged leaves out `error` and `interrupted`, plus
+`discovered_at_first_finish` and `fit_stage_done`.
 
 ## Making the bench harder
 
@@ -125,12 +160,13 @@ unchanged (it just takes as long as 40 real measurements).
 ```text
 run_lab.py            command line: runs, folders, summaries
 malus/apparatus.py    Apparatus interface, simulated bench, hardware stub
-malus/tools.py        the five tools
+malus/tools.py        the six tools
+malus/plotting.py     drawing a plot (matplotlib PNG, or SVG without matplotlib)
 malus/notebook.py     the lab notebook
 malus/llm.py          Ollama and OpenAI-compatible tool calling
 malus/lab.py          the conversation loop and run folders
 malus/evaluate.py     safe formula parsing and the final check
-prompts/              system prompt and task
+prompts/              system prompt, task, and the fit request
 tests/test_lab.py     offline tests against fake OpenAI and Ollama servers
 ```
 

@@ -143,7 +143,8 @@ class FakeModelServer:
 
     def check(self, payload):
         names = {t["function"]["name"] for t in payload.get("tools", [])}
-        if names != {"set_knobs", "read_voltage", "write_down", "read_notebook", "finish"}:
+        if names != {"set_knobs", "read_voltage", "write_down", "read_notebook", "plot",
+                     "finish"}:
             self.problems.append(f"tools offered: {sorted(names)}")
         messages = payload["messages"]
         open_ids: list = []
@@ -196,6 +197,7 @@ class SessionTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def session(self, style, script, **config):
+        config.setdefault("fit_stage", False)
         server = FakeModelServer(style, script)
         self.addCleanup(server.close)
         client = make_client("ollama" if style == "ollama" else "nrp", "fake-model",
@@ -259,6 +261,136 @@ class SessionTests(unittest.TestCase):
         self.assertEqual((summary["status"], summary["model_calls"]), ("call_limit", 4))
 
 
+class TextFallbackTests(unittest.TestCase):
+    def setUp(self):
+        from malus.tools import Toolbox, default_tools
+        self.schemas = Toolbox(default_tools(SimulatedPolarizerApparatus())).schemas()
+
+    def names(self, text):
+        from malus.llm import extract_text_tool_calls
+        return [(c.name, c.arguments) for c in extract_text_tool_calls(text, self.schemas)]
+
+    def test_bare_finish_arguments_are_a_finish_call(self):
+        """What gpt-oss wrote seven times instead of calling finish."""
+        text = '{\n  "conclusion": "cos squared", "formula": "0.05*A*cos(radians(B-C))**2"\n}'
+        self.assertEqual([n for n, _ in self.names(text)], ["finish"])
+
+    def test_leaked_gpt_oss_syntax(self):
+        self.assertEqual(self.names(" to=functions.read_voltage ...<|call|>"),
+                         [("read_voltage", {})])
+        self.assertEqual(self.names('to=functions.set_knobs <|message|>{"A": 40}<|call|>'),
+                         [("set_knobs", {"A": 40})])
+        self.assertEqual(self.names("to=functions.set_knobsp?<|call|>"), [])   # no such tool
+        self.assertEqual(self.names("to=functions.write_down <|call|>"), [])   # needs text
+
+    def test_prose_is_not_mistaken_for_a_call(self):
+        for text in ('Next I will set {"A": 50}.', "{}", 'Try {"samples": 5}',
+                     '{"conclusion": "x"}'):            # finish needs a formula too
+            self.assertEqual(self.names(text), [], text)
+
+
+def sweep(knob, values, fixed):
+    """Script steps that set each value and read it, one turn each."""
+    return [("tools", [("set_knobs", {**fixed, knob: v}), ("read_voltage", {})])
+            for v in values]
+
+
+DISCOVER = [
+    ("tools", [("set_knobs", {"A": 100, "B": 0, "C": 0}), ("read_voltage", {})]),
+    ("tools", [("set_knobs", {"C": 90}), ("read_voltage", {})]),
+]
+FIRST_GUESS = "0.05*A*cos(radians(C - B))**2"
+
+
+class PlotAndFitTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def session(self, script, **config):
+        server = FakeModelServer("openai", script)
+        self.addCleanup(server.close)
+        client = make_client("nrp", "fake-model", url=server.url)
+        summary = run_session(client, SimulatedPolarizerApparatus(seed=1),
+                              system_prompt="sys", task_prompt="task", folder=self.folder,
+                              config=LabConfig(verbose=False, **config), holdout_seed=5)
+        self.assertEqual(server.problems, [])
+        shown = [m["content"] for m in server.requests[-1]["messages"] if m["role"] == "tool"]
+        return summary, shown
+
+    def test_the_fit_stage_from_first_finish_to_hand_fit(self):
+        script = (DISCOVER
+                  + [("tools", [("finish", {"conclusion": "cos^2", "formula": FIRST_GUESS})])]
+                  + [("tools", [("finish", {"conclusion": "again", "formula": FIRST_GUESS})])]
+                  + sweep("C", [0, 30, 60, 90, 120, 150, 180], {"A": 100, "B": 0})
+                  + [("tools", [("plot", {"x": "C", "fixed": {"A": 100, "B": 0},
+                                          "formula": "4*cos(radians(C - B))**2"})]),
+                     ("tools", [("plot", {"x": "C", "fixed": {"A": 100, "B": 0},
+                                          "formula": "5*cos(radians(C - B))**2"})]),
+                     ("tools", [("finish", {"conclusion": "fitted",
+                                            "formula": "0.05*A*cos(radians(C - B))**2"})])])
+        summary, shown = self.session(script)
+        self.assertEqual((summary["status"], summary["fit_stage"]), ("finished", "done"))
+        self.assertTrue(summary["initial_discovered"])
+        self.assertTrue(summary["discovered"])
+        self.assertEqual(summary["initial_call"], 3)
+        self.assertEqual(summary["plots"], 2)
+        self.assertEqual(summary["readings_after_fit_request"], 7)
+        self.assertTrue(any("Before you finish" in t for t in shown))        # the request
+        self.assertTrue(any(t.startswith("Before finishing") for t in shown))  # the reminder
+        bad_fit, good_fit = [t for t in shown if t.startswith("Plot ")]
+        self.assertIn("C = 30: measured 3.7", good_fit)
+        self.assertIn("your curve 3.7500", good_fit)
+        rms = lambda text: float(text.rsplit(": ", 1)[1].split()[0])   # noqa: E731
+        self.assertGreater(rms(bad_fit), 10 * rms(good_fit))
+        for name in summary["plot_files"]:
+            self.assertTrue((self.folder / "plots" / name).exists(), name)
+        self.assertEqual(len((self.folder / "plots" / "plots.jsonl").read_text().splitlines()), 2)
+
+    def test_finishing_again_without_a_plot_is_accepted_after_three_tries(self):
+        finish = ("tools", [("finish", {"conclusion": "x", "formula": FIRST_GUESS})])
+        summary, shown = self.session(DISCOVER + [finish] * 4)
+        self.assertEqual((summary["status"], summary["fit_stage"]), ("finished", "skipped"))
+        self.assertEqual(sum(t.startswith("Before finishing") for t in shown), 2)
+
+    def test_running_out_of_calls_during_the_fit_still_scores_the_first_law(self):
+        finish = ("tools", [("finish", {"conclusion": "x", "formula": FIRST_GUESS})])
+        summary, _ = self.session(DISCOVER + [finish] + sweep("C", [0, 45, 90], {"A": 100, "B": 0}),
+                                  max_calls=5)
+        self.assertEqual((summary["status"], summary["fit_stage"]), ("call_limit", "requested"))
+        self.assertTrue(summary["initial_discovered"])
+        self.assertFalse(summary["discovered"])          # never handed in a final law
+
+    def test_plot_only_uses_readings_actually_taken(self):
+        script = (sweep("B", [0, 45, 90], {"A": 100, "C": 0})
+                  + [("tools", [("plot", {"x": "B", "fixed": {"A": 50, "C": 0}})])]
+                  + [("tools", [("plot", {"x": "B", "fixed": {"A": 100}})])]
+                  + [("tools", [("plot", {"x": "B", "fixed": {"A": 100, "C": 0}})])]
+                  + [("tools", [("plot", {"x": "B", "fixed": {"A": 100, "C": 0},
+                                          "formula": "import os"})])])
+        # one call more than the script, so the last result reaches a request
+        summary, shown = self.session(script, max_calls=8, fit_stage=False)
+        self.assertIn("You have no readings with A = 50, C = 0", shown[6])
+        self.assertIn("fixed is missing C", shown[7])
+        self.assertIn("Plot 1: 3 readings", shown[8])
+        self.assertIn("data only", shown[8])
+        self.assertIn("could not be used", shown[9])
+        self.assertEqual(summary["plots"], 1)
+
+    def test_plots_fall_back_to_svg_without_matplotlib(self):
+        from unittest.mock import patch
+        from malus.plotting import render
+        with patch.dict(sys.modules, {"matplotlib": None, "matplotlib.pyplot": None}):
+            path = render(self.folder / "p", x_label="knob B", y_label="voltage (V)", title="t",
+                          points=[(0, 5.0), (45, 2.5), (90, 0.0)],
+                          curve=[(0, 5.0), (45, 2.5), (90, 0.0)])
+        self.assertEqual(path.suffix, ".svg")
+        self.assertIn("<circle", path.read_text())
+
+
 class CommandLineTests(unittest.TestCase):
     def test_numbered_runs_and_runs_summary(self):
         import run_lab
@@ -267,7 +399,7 @@ class CommandLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out:
             rc = run_lab.main(["--provider", "nrp", "--llm-url", server.url, "--model",
                                "fake:model", "--runs", "2", "--out-dir", out, "--quiet",
-                               "--randomize-calibration"])
+                               "--randomize-calibration", "--no-fit-stage"])
             self.assertEqual(rc, 0)
             model_dir = Path(out) / "fake_model"
             totals = json.loads((model_dir / "runs_summary.json").read_text())
@@ -278,6 +410,8 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(totals["discovered"], 0)
             run1 = json.loads((model_dir / "001" / "summary.json").read_text())
             self.assertEqual(run1["apparatus"], "simulated")
+            self.assertIn("3 knobs", run1["prompts"]["task"])     # the wording it saw
+            self.assertIsNone(run1["prompts"]["fit_request"])
             self.assertNotEqual(run1["simulation"]["full_scale_volts"], 5.0)
 
 

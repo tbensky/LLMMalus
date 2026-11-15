@@ -24,13 +24,30 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .apparatus import Apparatus
-from .evaluate import score_formula
+from .evaluate import collect_holdout, score_formula
 from .llm import ChatClient, LLMError, ToolCall, extract_text_tool_calls
 from .notebook import Notebook
 from .tools import LabState, ToolResult, Toolbox, default_tools
 
 NUDGE = ("Please carry on by using your tools. When you are satisfied with "
          "your findings, call finish.")
+# Sent in reply to the model's FIRST finish: it now says it understands the
+# knobs, so ask for the end-of-lab write-up. Overridden by
+# prompts/fit_request.txt when the command line finds one.
+DEFAULT_FIT_REQUEST = (
+    "Before you finish, please complete the experiment the way a student does at the end "
+    "of a lab:\n"
+    "1. Take a systematic set of data: sweep a knob in even steps across its range while "
+    "holding the other knobs fixed.\n"
+    "2. Fit your law to that data by hand. Choose values for your constants, use plot to "
+    "graph the data with your curve, look at how well the curve goes through the points, "
+    "then adjust the constants yourself and plot again, until you are satisfied with the "
+    "fit. Do not use any automatic fitting procedure; choose the numbers yourself.\n"
+    "3. Record your final constants in your notebook, then call finish again with your "
+    "fitted law."
+)
+FIT_REMINDER = ("Before finishing, make at least one plot of systematic data with your "
+                "hand-fitted curve, using plot, as described above.")
 TRIM_NOTE = ("(Earlier parts of this conversation have been removed to save "
              "space. Your notebook still has everything you wrote down.)")
 
@@ -44,6 +61,13 @@ class LabConfig:
     holdout_samples: int = 3
     threshold: float = 0.05       # normalized RMS error that counts as discovered
     verbose: bool = True
+    # The first finish means "I understand the knobs": answer it with
+    # fit_request (take systematic data, fit by hand, plot) and accept a
+    # later finish once at least one new plot exists. After
+    # max_finish_refusals finishes without a plot, accept anyway.
+    fit_stage: bool = True
+    fit_request: str = DEFAULT_FIT_REQUEST
+    max_finish_refusals: int = 3
 
 
 def trim_history(messages: list[dict[str, Any]], keep_last: int) -> list[dict[str, Any]]:
@@ -72,6 +96,10 @@ class _Transcript:
             return
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
+
+def result_formula(data: dict[str, Any]) -> str:
+    return str(data.get("formula") or "")
 
 
 def _short(text: str, limit: int = 400) -> str:
@@ -106,6 +134,10 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
     idle = 0
     text_fallbacks = 0
     calls_made = 0
+    fit_state = "not_reached" if config.fit_stage else "off"
+    initial: dict[str, Any] = {}      # the law at the model's first finish
+    plots_at_request = readings_at_request = 0
+    finish_refusals = 0
 
     for call_number in range(1, config.max_calls + 1):
         state.call = call_number
@@ -120,7 +152,7 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
         calls = list(reply.tool_calls)
         from_text = False
         if not calls and reply.text:
-            calls = extract_text_tool_calls(reply.text, set(toolbox.tools))
+            calls = extract_text_tool_calls(reply.text, toolbox.schemas())
             from_text = bool(calls)
             text_fallbacks += int(from_text)
         messages.append(reply.assistant_message)
@@ -149,6 +181,22 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
                                     f"({tool_call.parse_error}). Send them as a JSON object.")
             else:
                 result = toolbox.run(state, tool_call.name, tool_call.arguments)
+            if result.finished and config.fit_stage:
+                if fit_state == "not_reached":
+                    initial = {**result.data, "call": call_number}
+                    fit_state = "requested"
+                    plots_at_request, readings_at_request = len(state.plots), state.readings
+                    result = ToolResult(config.fit_request, data={"fit_request": True})
+                    say(f"[fit] first finish at call {call_number}: "
+                        f"{result_formula(initial)!r}; asking for systematic data and a hand fit")
+                elif fit_state == "requested" and len(state.plots) == plots_at_request:
+                    finish_refusals += 1
+                    if finish_refusals < config.max_finish_refusals:
+                        result = ToolResult(FIT_REMINDER, data={"fit_reminder": finish_refusals})
+                    else:
+                        fit_state = "skipped"
+                elif fit_state == "requested":
+                    fit_state = "done"
             tool_counts[tool_call.name] += 1
             transcript.write(call=call_number, role="tool", name=tool_call.name,
                              arguments=tool_call.arguments, content=result.text,
@@ -169,15 +217,22 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
             status = "finished"
             break
 
+    # Score the final law and, with the fit stage, the law at the first
+    # finish too, against the same fresh readings.
     evaluation: dict[str, Any] | None = None
-    if status == "finished":
+    initial_evaluation: dict[str, Any] | None = None
+    if status == "finished" or initial:
         say("[check] testing the law against fresh readings...")
         try:
-            evaluation = score_formula(
-                finish_data.get("formula", ""), apparatus,
-                points=config.holdout_points, samples=config.holdout_samples,
-                seed=holdout_seed, threshold=config.threshold,
-            )
+            holdout = collect_holdout(apparatus, points=config.holdout_points,
+                                      samples=config.holdout_samples, seed=holdout_seed)
+            if status == "finished":
+                evaluation = score_formula(finish_data.get("formula", ""), apparatus,
+                                           threshold=config.threshold, holdout=holdout)
+            if initial:
+                initial_evaluation = score_formula(initial.get("formula", ""), apparatus,
+                                                   threshold=config.threshold, holdout=holdout)
+                initial_evaluation.pop("points", None)
         except Exception as exc:  # noqa: BLE001 - a failed check must not lose the run
             evaluation = {"error": f"{type(exc).__name__}: {exc}", "discovered": False}
 
@@ -188,6 +243,19 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
         "formula": finish_data.get("formula"),
         "nrmse": evaluation.get("nrmse") if evaluation else None,
         "r2": evaluation.get("r2") if evaluation else None,
+        # The fit stage: off, not_reached (never called finish), requested
+        # (asked for the fit, never finished), done, or skipped (finished
+        # again without plotting max_finish_refusals times).
+        "fit_stage": fit_state,
+        "initial_formula": initial.get("formula"),
+        "initial_conclusion": initial.get("conclusion"),
+        "initial_call": initial.get("call"),
+        "initial_discovered": bool(initial_evaluation and initial_evaluation.get("discovered")),
+        "initial_nrmse": initial_evaluation.get("nrmse") if initial_evaluation else None,
+        "plots": len(state.plots),
+        "plot_files": [p["file"] for p in state.plots if p.get("file")],
+        "readings_after_fit_request": (state.readings - readings_at_request
+                                       if fit_state not in {"off", "not_reached"} else None),
         "model_calls": calls_made,
         "tool_counts": dict(tool_counts),
         "readings": state.readings,
@@ -199,6 +267,7 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
         "error": error,
         **(extra or {}),
         "evaluation": evaluation,
+        "initial_evaluation": initial_evaluation,
     }
     if folder is not None:
         (folder / "summary.json").write_text(
@@ -208,7 +277,14 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
     if status != "finished":
         verdict = f"stopped ({status})"
     detail = f", nrmse={summary['nrmse']:.3f}" if isinstance(summary["nrmse"], float) else ""
-    say(f"[result] {verdict}{detail}; formula: {summary['formula']!r}")
+    if initial:
+        first = "right" if summary["initial_discovered"] else "wrong"
+        first_detail = (f", nrmse={summary['initial_nrmse']:.3f}"
+                        if isinstance(summary["initial_nrmse"], float) else "")
+        say(f"[result] law at first finish (call {initial['call']}): {first}{first_detail}; "
+            f"{summary['initial_formula']!r}")
+    say(f"[result] {verdict}{detail}; formula: {summary['formula']!r}; "
+        f"fit stage: {fit_state}, {len(state.plots)} plot(s)")
     return summary
 
 
@@ -265,6 +341,10 @@ def write_runs_summary(model_dir: Path, model: str) -> dict[str, Any]:
             "discovered": bool(s.get("discovered")),
             "formula": s.get("formula"),
             "nrmse": s.get("nrmse"),
+            "initial_discovered": bool(s.get("initial_discovered")),
+            "initial_formula": s.get("initial_formula"),
+            "fit_stage": s.get("fit_stage"),
+            "plots": s.get("plots"),
             "model_calls": s.get("model_calls"),
             "readings": s.get("readings"),
             "notebook_entries": s.get("notebook_entries"),
@@ -286,6 +366,10 @@ def write_runs_summary(model_dir: Path, model: str) -> dict[str, Any]:
         "judged": len(judged),
         "discovered": len(found),
         "discovery_rate": round(len(found) / len(judged), 3) if judged else None,
+        # The law the model gave the first time it called finish, before the
+        # hand fit; and how many runs completed the fit stage.
+        "discovered_at_first_finish": sum(r["initial_discovered"] for r in rows),
+        "fit_stage_done": sum(r["fit_stage"] == "done" for r in rows),
         "statuses": dict(sorted(statuses.items())),
         "median_calls_when_discovered": statistics.median(calls) if calls else None,
         "run_list": rows,

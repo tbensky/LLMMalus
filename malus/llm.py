@@ -16,6 +16,7 @@ DeepSeek's own API and Ollama's /v1 endpoint. Standard library only.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -77,31 +78,84 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
     raise LLMError(f"Giving up on {url} after {attempts} attempts: {last_error}")
 
 
-def extract_text_tool_calls(text: str, tool_names: set[str]) -> list[ToolCall]:
-    """Find tool calls a model wrote as JSON in its text instead of calling.
+# gpt-oss's own tool-call syntax, when the host fails to parse it and hands
+# it back as text: "<|channel|>commentary to=functions.read_voltage ... <|call|>"
+_LEAKED_CALL_RE = re.compile(r"to=functions\.([A-Za-z_]\w*)")
 
-    Some models (or some hosts) do not support native tool calling and
-    write {"name": "read_voltage", "arguments": {...}} in the reply instead.
-    """
-    calls: list[ToolCall] = []
+
+def _tool_specs(tools: list[dict[str, Any]]) -> dict[str, tuple[set[str], set[str]]]:
+    """name -> (required argument names, all argument names)."""
+    specs = {}
+    for tool in tools:
+        function = tool.get("function", tool)
+        params = function.get("parameters") or {}
+        specs[function["name"]] = (set(params.get("required") or []),
+                                   set((params.get("properties") or {}).keys()))
+    return specs
+
+
+def _json_objects(text: str, start: int = 0, limit: int = 8):
     decoder = json.JSONDecoder()
-    index = 0
-    while len(calls) < 8:
-        start = text.find("{", index)
-        if start < 0:
-            break
+    index, found = start, 0
+    while found < limit:
+        begin = text.find("{", index)
+        if begin < 0:
+            return
         try:
-            value, end = decoder.raw_decode(text, start)
+            value, end = decoder.raw_decode(text, begin)
         except ValueError:
-            index = start + 1
+            index = begin + 1
             continue
         index = end
-        if isinstance(value, dict) and value.get("name") in tool_names:
-            raw = value.get("arguments", value.get("parameters", {}))
-            args, error = parse_arguments(raw)
-            calls.append(ToolCall(id=f"text_{len(calls) + 1}", name=value["name"],
-                                  arguments=args, raw_arguments=raw,
-                                  parse_error=error, from_text=True))
+        found += 1
+        yield begin, value
+
+
+def extract_text_tool_calls(text: str, tools: list[dict[str, Any]]) -> list[ToolCall]:
+    """Find tool calls a model wrote as text instead of calling a tool.
+
+    Three shapes are recognized, seen from real models on real hosts:
+
+    1. {"name": "read_voltage", "arguments": {...}}  (a call written out)
+    2. {"conclusion": "...", "formula": "..."}        (just the arguments: gpt-oss
+       did this seven times with finish's arguments). Matched to a tool only
+       when the keys include all of that tool's required arguments, use no
+       others, and fit exactly one tool. Tools without required arguments are
+       never matched this way, so a stray {"A": 50} in prose moves nothing.
+    3. "to=functions.read_voltage ... <|call|>"       (gpt-oss's own syntax
+       leaking through). Arguments are taken from the next JSON object if
+       there is one; a tool that needs arguments is skipped without them.
+    """
+    specs = _tool_specs(tools)
+    calls: list[ToolCall] = []
+
+    def add(name: str, raw: Any) -> None:
+        args, error = parse_arguments(raw)
+        calls.append(ToolCall(id=f"text_{len(calls) + 1}", name=name, arguments=args,
+                              raw_arguments=raw, parse_error=error, from_text=True))
+
+    leaks = [m for m in _LEAKED_CALL_RE.finditer(text) if m.group(1) in specs]
+    if leaks:
+        for match in leaks[:8]:
+            name = match.group(1)
+            following = next(_json_objects(text, match.end(), limit=1), None)
+            if following and following[0] - match.end() < 200 and isinstance(following[1], dict):
+                add(name, following[1])
+            elif not specs[name][0]:
+                add(name, {})
+        return calls
+
+    for _, value in _json_objects(text):
+        if not isinstance(value, dict) or not value:
+            continue
+        if value.get("name") in specs:
+            add(value["name"], value.get("arguments", value.get("parameters", {})))
+            continue
+        keys = set(value)
+        matches = [name for name, (required, allowed) in specs.items()
+                   if required and required <= keys <= allowed]
+        if len(matches) == 1:
+            add(matches[0], value)
     return calls
 
 

@@ -30,7 +30,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from malus.apparatus import HardwareApparatus, SimulatedPolarizerApparatus, SimulationConfig  # noqa: E402
-from malus.lab import LabConfig, next_run_dir, run_session, safe_model_name, write_runs_summary  # noqa: E402
+from malus.lab import (DEFAULT_FIT_REQUEST, LabConfig, next_run_dir, run_session,  # noqa: E402
+                       safe_model_name, write_runs_summary)
 from malus.llm import make_client  # noqa: E402
 
 MAX_CONSECUTIVE_ERRORS = 3
@@ -56,7 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     lab = p.add_argument_group("session")
     lab.add_argument("--runs", type=int, default=1, help="Independent runs to do in a row")
-    lab.add_argument("--max-calls", type=int, default=150, help="Model calls per run")
+    lab.add_argument("--max-calls", type=int, default=250,
+                     help="Model calls per run (the fit stage needs room after the first finish)")
     lab.add_argument("--keep-last", type=int, default=0,
                      help="Keep only the last N exchanges in context (0 = all); "
                           "anything older survives only in the notebook")
@@ -66,6 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Fresh readings used to check the final law")
     lab.add_argument("--system-prompt-file", default=str(HERE / "prompts" / "system.txt"))
     lab.add_argument("--task-prompt-file", default=str(HERE / "prompts" / "task.txt"))
+    lab.add_argument("--fit-request-file", default=str(HERE / "prompts" / "fit_request.txt"),
+                     help="Sent in reply to the first finish: take data and fit by hand")
+    lab.add_argument("--no-fit-stage", action="store_true",
+                     help="Accept the first finish; no systematic data, hand fit or plots asked for")
     lab.add_argument("--out-dir", default=str(HERE / "Runs"))
     lab.add_argument("--quiet", action="store_true", help="Only print one line per run")
 
@@ -113,9 +119,13 @@ def main(argv: list[str] | None = None) -> int:
     client = make_client(args.provider, args.model, url=args.llm_url,
                          api_key=args.llm_api_key or None, temperature=args.temperature,
                          num_ctx=args.num_ctx, think=think, timeout=args.timeout)
+    fit_request_path = Path(args.fit_request_file)
+    fit_request = (fit_request_path.read_text(encoding="utf-8").strip()
+                   if fit_request_path.exists() else DEFAULT_FIT_REQUEST)
     config = LabConfig(max_calls=args.max_calls, keep_last=args.keep_last,
                        holdout_points=args.holdout_points, threshold=args.threshold,
-                       verbose=not args.quiet)
+                       verbose=not args.quiet, fit_stage=not args.no_fit_stage,
+                       fit_request=fit_request)
     model_dir = Path(args.out_dir).resolve() / safe_model_name(args.model)
     consecutive_errors = 0
 
@@ -132,7 +142,12 @@ def main(argv: list[str] | None = None) -> int:
         extra = {"model": args.model, "provider": args.provider, "run": f"{number:03d}",
                  "seed": seed, **bench_info,
                  "settings": {"max_calls": args.max_calls, "keep_last": args.keep_last,
-                              "threshold": args.threshold, "temperature": args.temperature}}
+                              "threshold": args.threshold, "temperature": args.temperature,
+                              "fit_stage": not args.no_fit_stage},
+                 # which wording this run saw, so runs on different prompts
+                 # can always be told apart
+                 "prompts": {"system": system_prompt, "task": task_prompt,
+                             "fit_request": None if args.no_fit_stage else fit_request}}
         try:
             summary = run_session(client, apparatus, system_prompt=system_prompt,
                                   task_prompt=task_prompt, folder=run_dir, config=config,

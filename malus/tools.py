@@ -44,9 +44,16 @@ class LabState:
     call: int = 0                  # current model call, set by the loop
     readings: int = 0              # detector readings taken (each sample counts)
     knob_moves: int = 0
+    # Every read_voltage result, so plot can draw only data actually taken.
+    measurements: list[dict[str, Any]] = field(default_factory=list)
+    plots: list[dict[str, Any]] = field(default_factory=list)
     _csv_started: bool = False
 
     def log_measurement(self, settings: dict[str, float], values: list[float]) -> None:
+        self.measurements.append({
+            "call": self.call, "settings": dict(settings),
+            "mean": statistics.fmean(values), "samples": len(values),
+        })
         if self.folder is None:
             return
         path = self.folder / "measurements.csv"
@@ -202,6 +209,148 @@ class ReadNotebook(Tool):
                           data={"entries": len(state.notebook.entries)})
 
 
+class Plot(Tool):
+    """Graph measured voltage against one knob, with the model's curve.
+
+    The points come from the lab's own record of read_voltage results,
+    never from numbers the model types in, so a graph can only show data
+    that was really taken. The model chooses the data set (which knob on
+    the x-axis, where the others were held) and the curve (its law with
+    constants it picked itself). It gets back a table of each point next to
+    its curve's value: a text model cannot look at the PNG, so the table is
+    how it "sees" whether the curve goes through the points.
+    """
+
+    name = "plot"
+    MATCH_TOLERANCE = 1e-6
+    MAX_ROWS = 50
+    CURVE_POINTS = 241
+
+    def __init__(self, apparatus: Apparatus):
+        self.knob_names = [k.name for k in apparatus.knobs]
+        self.signal = f"{apparatus.signal_name} ({apparatus.signal_units})"
+        self.units = apparatus.signal_units
+        self.description = (
+            f"Make a graph of the {apparatus.signal_name}s you have measured against one knob, "
+            "with the other knobs held at fixed settings, and optionally draw your own curve "
+            "through them. Only readings you have actually taken are plotted. The graph is "
+            "saved with your lab work, and you get back a table of each data point next to "
+            "your curve's value at that point."
+        )
+        self.parameters = {
+            "type": "object",
+            "properties": {
+                "x": {"type": "string", "enum": self.knob_names,
+                      "description": "The knob for the horizontal axis."},
+                "fixed": {
+                    "type": "object",
+                    "description": ("Where every other knob was held for this data set, e.g. "
+                                    "{\"A\": 100, \"C\": 0}. Only readings taken at exactly "
+                                    "these settings are plotted."),
+                    "properties": {k: {"type": "number"} for k in self.knob_names},
+                },
+                "formula": {
+                    "type": "string",
+                    "description": ("Optional. Your curve: a Python expression for the "
+                                    f"{apparatus.signal_name} in terms of "
+                                    f"{', '.join(self.knob_names)}, with your chosen constants "
+                                    "filled in as numbers (the same form as for finish)."),
+                },
+                "title": {"type": "string", "description": "Optional title for the graph."},
+            },
+            "required": ["x", "fixed"],
+        }
+
+    def run(self, state: LabState, args: dict[str, Any]) -> ToolResult:
+        from .evaluate import FormulaError, compile_formula
+        from .plotting import render
+
+        x = str(args.get("x") or "")
+        if x not in self.knob_names:
+            return ToolResult(f"x must be one of {', '.join(self.knob_names)}.")
+        fixed_raw = args.get("fixed") or {}
+        if not isinstance(fixed_raw, dict):
+            return ToolResult("fixed must be an object such as {\"A\": 100, \"C\": 0}.")
+        try:
+            fixed = {str(k): float(v) for k, v in fixed_raw.items() if str(k) != x}
+        except (TypeError, ValueError):
+            return ToolResult("Every value in fixed must be a number.")
+        missing = [k for k in self.knob_names if k != x and k not in fixed]
+        if missing:
+            return ToolResult(f"Say where the other knobs were held: fixed is missing "
+                              f"{', '.join(missing)}.")
+
+        points = sorted(
+            (m["settings"][x], m["mean"]) for m in state.measurements
+            if all(abs(m["settings"][k] - v) <= self.MATCH_TOLERANCE for k, v in fixed.items())
+        )
+        held = ", ".join(f"{k} = {v:g}" for k, v in fixed.items())
+        if not points:
+            return ToolResult(f"You have no readings with {held}. Take some with "
+                              "set_knobs and read_voltage first.")
+
+        formula = str(args.get("formula") or "").strip()
+        law = None
+        if formula:
+            try:
+                law = compile_formula(formula, tuple(self.knob_names))
+            except FormulaError as exc:
+                return ToolResult(f"Your formula could not be used: {exc}")
+
+        def curve_at(xv: float) -> float:
+            return law(*[xv if k == x else fixed[k] for k in self.knob_names])
+
+        curve = None
+        rows = []
+        try:
+            if law is not None:
+                lo, hi = points[0][0], points[-1][0]
+                if hi > lo:
+                    step = (hi - lo) / (self.CURVE_POINTS - 1)
+                    curve = [(lo + i * step, curve_at(lo + i * step))
+                             for i in range(self.CURVE_POINTS)]
+            for xv, measured in points:
+                rows.append((xv, measured, curve_at(xv) if law is not None else None))
+        except (ArithmeticError, ValueError, TypeError) as exc:
+            return ToolResult(f"Your formula failed to evaluate: {exc}")
+
+        number = len(state.plots) + 1
+        title = str(args.get("title") or "").strip() or f"{self.signal} vs knob {x}, {held}"
+        saved = None
+        if state.folder is not None:
+            folder = state.folder / "plots"
+            folder.mkdir(exist_ok=True)
+            saved = render(folder / f"plot_{number:02d}", x_label=f"knob {x}",
+                           y_label=self.signal, title=title, points=points, curve=curve,
+                           curve_label=formula)
+        residuals = [m - c for _, m, c in rows if c is not None]
+        rms = (sum(r * r for r in residuals) / len(residuals)) ** 0.5 if residuals else None
+        record = {"number": number, "call": state.call, "x": x, "fixed": fixed,
+                  "formula": formula, "title": title, "points": len(points),
+                  "rms": rms, "file": saved.name if saved else None}
+        state.plots.append(record)
+        if state.folder is not None:
+            with (state.folder / "plots" / "plots.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps({**record, "data": rows}, ensure_ascii=False) + "\n")
+
+        lines = [f"Plot {number}: {len(points)} readings of the {self.signal} against knob {x} "
+                 f"with {held}" + (", with your curve." if law else ", data only.")]
+        for xv, measured, predicted in rows[: self.MAX_ROWS]:
+            if predicted is None:
+                lines.append(f"  {x} = {xv:g}: measured {measured:.4f} {self.units}")
+            else:
+                lines.append(f"  {x} = {xv:g}: measured {measured:.4f}, your curve "
+                             f"{predicted:.4f}, difference {measured - predicted:+.4f} {self.units}")
+        if len(rows) > self.MAX_ROWS:
+            lines.append(f"  ... and {len(rows) - self.MAX_ROWS} more readings")
+        if rms is not None:
+            lines.append(f"Root-mean-square difference between your curve and the data: "
+                         f"{rms:.4f} {self.units}")
+        if len(points) < 3:
+            lines.append("Only a few readings match these settings; a sweep needs more.")
+        return ToolResult("\n".join(lines), data=record)
+
+
 class Finish(Tool):
     name = "finish"
     description = (
@@ -240,7 +389,7 @@ class Finish(Tool):
 
 def default_tools(apparatus: Apparatus) -> list[Tool]:
     return [SetKnobs(apparatus), ReadVoltage(apparatus), WriteDown(),
-            ReadNotebook(), Finish()]
+            ReadNotebook(), Plot(apparatus), Finish()]
 
 
 class Toolbox:
