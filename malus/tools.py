@@ -48,6 +48,7 @@ class LabState:
     # Every read_voltage result, so plot can draw only data actually taken.
     measurements: list[dict[str, Any]] = field(default_factory=list)
     plots: list[dict[str, Any]] = field(default_factory=list)
+    plot_checks: list[dict[str, Any]] = field(default_factory=list)  # audit of each plot
     _csv_started: bool = False
 
     def log_measurement(self, settings: dict[str, float], values: list[float]) -> None:
@@ -221,12 +222,13 @@ class Plot(Tool):
     points.
 
     Because the model types the numbers, a plot could show values it never
-    measured, or a real reading moved to the wrong settings. Each plot is
-    therefore checked silently (the model is not told) by audit.audit_points:
-    every point is clean, moved, rounded or untraced, and the counts and the
-    reading each point came from are kept in plots.jsonl and the summary.
-    A y the model derived itself (V/A, a normalized value...) will show as
-    untraced; that is a choice to look at, not an error.
+    measured, a real reading moved to the wrong settings, or idealized values
+    that sit on its curve. Each plot is therefore checked by audit.audit_points:
+    every point is clean, rounded, moved or untraced, and a plot with a curve
+    is also tested for idealized data. The counts and the reading each point
+    came from are kept in plots.jsonl and the summary. plot itself says
+    nothing about it; the finish gate in lab.py does, if the model tries to
+    finish on a plot that fails.
     """
 
     name = "plot"
@@ -323,7 +325,8 @@ class Plot(Tool):
         except (ArithmeticError, ValueError, TypeError) as exc:
             return ToolResult(f"Your formula failed to evaluate: {exc}")
 
-        check = audit_points(points, state.measurements, self.knobs)
+        check = audit_points(points, state.measurements, self.knobs,
+                             curve=[c for _, _, c in rows] if law is not None else None)
 
         number = len(state.plots) + 1
         x_label = str(args.get("x_label") or "").strip() or "x"
@@ -340,10 +343,14 @@ class Plot(Tool):
         record = {"number": number, "call": state.call, "formula": formula, "title": title,
                   "x_label": x_label, "y_label": y_label, "points": len(points),
                   "rms": rms, "file": saved.name if saved else None,
-                  # the silent data check (audit.py); never shown to the model
-                  "axis": check["axis"], "clean": check["clean"], "moved": check["moved"],
-                  "rounded": check["rounded"], "untraced": check["untraced"]}
+                  # the data check (audit.py); the model hears about it only if
+                  # it tries to finish on a plot that fails it
+                  "axis": check["axis"], "y_quantity": check["y_quantity"],
+                  "clean": check["clean"], "moved": check["moved"],
+                  "rounded": check["rounded"], "untraced": check["untraced"],
+                  "too_good": check["too_good"], "rms_readings": check["rms_readings"]}
         state.plots.append(record)
+        state.plot_checks.append(check)
         if state.folder is not None:
             with (state.folder / "plots" / "plots.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({**record, "data": rows, "check": check["points"]},

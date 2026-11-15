@@ -295,9 +295,26 @@ def sweep(knob, values, fixed):
             for v in values]
 
 
-# What a scripted model types into plot: its C sweep as [x, y] pairs.
+# Idealized values for a C sweep: what cos^2 predicts, not what was read
+# (gemma did this). The data check refuses to finish on them.
 SWEEP_POINTS = [[0, 5.0], [30, 3.75], [60, 1.25], [90, 0.0], [120, 1.25], [150, 3.75],
                 [180, 5.0]]
+
+
+def real_points(earlier_reads, knob, values, fixed, seed=1):
+    """What a scripted model would read in a sweep, as [x, y] pairs shown to 4
+    decimals: replays the session's reads on an identical bench (same seed)."""
+    bench = SimulatedPolarizerApparatus(seed=seed)
+    for settings in earlier_reads:
+        for name, value in settings.items():
+            bench.set_knob(name, value)
+        bench.read_signal()
+    points = []
+    for v in values:
+        for name, value in {**fixed, knob: v}.items():
+            bench.set_knob(name, value)
+        points.append([v, round(bench.read_signal(), 4)])
+    return points
 
 DISCOVER = [
     ("tools", [("set_knobs", {"A": 100, "B": 0, "C": 0}), ("read_voltage", {})]),
@@ -326,13 +343,16 @@ class PlotAndFitTests(unittest.TestCase):
         return summary, shown
 
     def test_the_fit_stage_from_first_finish_to_hand_fit(self):
+        angles = [0, 30, 60, 90, 120, 150, 180]
+        data = real_points([{"A": 100, "B": 0, "C": 0}, {"C": 90}], "C", angles,
+                           {"A": 100, "B": 0})
         script = (DISCOVER
                   + [("tools", [("finish", {"conclusion": "cos^2", "formula": FIRST_GUESS})])]
                   + [("tools", [("finish", {"conclusion": "again", "formula": FIRST_GUESS})])]
-                  + sweep("C", [0, 30, 60, 90, 120, 150, 180], {"A": 100, "B": 0})
-                  + [("tools", [("plot", {"points": SWEEP_POINTS, "x_label": "C (deg)",
+                  + sweep("C", angles, {"A": 100, "B": 0})
+                  + [("tools", [("plot", {"points": data, "x_label": "C (deg)",
                                           "formula": "4*cos(radians(x))**2"})]),
-                     ("tools", [("plot", {"points": SWEEP_POINTS, "x_label": "C (deg)",
+                     ("tools", [("plot", {"points": data, "x_label": "C (deg)",
                                           "formula": "5*cos(radians(x))**2"})]),
                      ("tools", [("finish", {"conclusion": "fitted",
                                             "formula": "0.05*A*cos(radians(C - B))**2"})])])
@@ -347,8 +367,12 @@ class PlotAndFitTests(unittest.TestCase):
         self.assertTrue(any(t.startswith("Before finishing") for t in shown))  # the reminder
         bad_fit, good_fit = [t for t in shown if t.startswith("Plot ")]
         self.assertIn("Plot 2: 7 points, y against C (deg), with your curve.", good_fit)
-        self.assertIn("x = 30: y = 3.75, your curve 3.75, difference +0", good_fit)
-        self.assertIn("x = 30: y = 3.75, your curve 3, difference +0.75", bad_fit)
+        y30 = data[1][1]
+        self.assertIn(f"x = 30: y = {y30:.4g}, your curve 3.75, difference {y30 - 3.75:+.4g}",
+                      good_fit)
+        self.assertIn(f"x = 30: y = {y30:.4g}, your curve 3, difference {y30 - 3:+.4g}", bad_fit)
+        self.assertEqual(summary["data_check"], "clean")
+        self.assertEqual(summary["final_plot"]["clean"], 7)
         rms = lambda text: float(text.rsplit(": ", 1)[1].split()[0])   # noqa: E731
         self.assertGreater(rms(bad_fit), 10 * rms(good_fit))
         for name in summary["plot_files"]:
@@ -425,18 +449,65 @@ class PlotAndFitTests(unittest.TestCase):
 
     def test_a_hand_fit_before_the_first_finish_is_accepted_unprompted(self):
         """finish's description asks for the fit; a model that does it first is done."""
-        script = (sweep("C", [0, 45, 90, 135, 180], {"A": 100, "B": 0})
-                  + [("tools", [("plot", {"points": SWEEP_POINTS,
+        angles = [0, 30, 60, 90, 120, 150, 180]
+        data = real_points([], "C", angles, {"A": 100, "B": 0})
+        script = (sweep("C", angles, {"A": 100, "B": 0})
+                  + [("tools", [("plot", {"points": data,
                                           "formula": "5*cos(radians(x))**2"})]),
                      ("tools", [("finish", {"conclusion": "fitted", "formula": FIRST_GUESS})])])
         summary, shown = self.session(script)
         self.assertEqual((summary["status"], summary["fit_stage"]), ("finished", "unprompted"))
+        self.assertEqual((summary["data_check"], summary["data_refusals"]), ("clean", 0))
         self.assertFalse(any("Before you finish" in t for t in shown))   # no request sent
         self.assertTrue(summary["discovered"])
         self.assertIsNone(summary["readings_after_fit_request"])
         self.assertEqual(summary["plot_points"], 7)
         self.assertEqual(sum(summary[f"plot_points_{k}"]
                              for k in ("clean", "moved", "rounded", "untraced")), 7)
+
+    def test_finishing_on_idealized_data_is_refused_until_the_real_data_is_plotted(self):
+        """gemma's run: it plotted cos^2 itself instead of its readings."""
+        angles = [0, 30, 60, 90, 120, 150, 180]
+        data = real_points([], "C", angles, {"A": 100, "B": 0})
+        finish = ("tools", [("finish", {"conclusion": "fitted", "formula": FIRST_GUESS})])
+        script = (sweep("C", angles, {"A": 100, "B": 0})
+                  + [("tools", [("plot", {"points": SWEEP_POINTS,
+                                          "formula": "5*cos(radians(x))**2"})]), finish,
+                     ("tools", [("plot", {"points": data,
+                                          "formula": "5*cos(radians(x))**2"})]), finish])
+        summary, shown = self.session(script)
+        self.assertEqual((summary["status"], summary["fit_stage"]), ("finished", "unprompted"))
+        self.assertEqual((summary["data_check"], summary["data_refusals"]), ("corrected", 1))
+        self.assertEqual(summary["rejected_plots"], [1])
+        self.assertEqual(summary["plots_idealized"], 1)
+        self.assertEqual(summary["final_plot"]["number"], 2)
+        refusal = next(t for t in shown if t.startswith("Before you finish: the data"))
+        self.assertIn("What does not match in plot 1:", refusal)
+        self.assertIn("Your points lie", refusal)
+        self.assertIn(f"At x = 0 you plotted 5, but your reading (A = 100, B = 0, C = 0) "
+                      f"was {data[0][1]:.4f}.", refusal)
+
+    def test_a_stubborn_model_is_let_go_after_three_refusals(self):
+        finish = ("tools", [("finish", {"conclusion": "x", "formula": FIRST_GUESS})])
+        script = (sweep("C", [0, 90], {"A": 100, "B": 0})
+                  + [("tools", [("plot", {"points": [[0, 4.2], [45, 3.1], [90, 0.7]],
+                                          "formula": "5*cos(radians(x))**2"})])]
+                  + [finish] * 4)
+        summary, shown = self.session(script)
+        self.assertEqual((summary["status"], summary["data_check"]), ("finished", "unresolved"))
+        self.assertEqual(summary["data_refusals"], 3)
+        refusal = next(t for t in shown if t.startswith("Before you finish: the data"))
+        self.assertIn("x = 45, y = 3.1: none of the readings you took match this point.",
+                      refusal)
+
+    def test_the_refusal_can_be_turned_off(self):
+        script = (sweep("C", [0, 90], {"A": 100, "B": 0})
+                  + [("tools", [("plot", {"points": SWEEP_POINTS,
+                                          "formula": "5*cos(radians(x))**2"})]),
+                     ("tools", [("finish", {"conclusion": "x", "formula": FIRST_GUESS})])])
+        summary, _ = self.session(script, data_check=False)
+        self.assertEqual((summary["status"], summary["data_check"]), ("finished", "off"))
+        self.assertEqual(summary["plots_idealized"], 1)       # still recorded
 
     def test_a_data_only_plot_does_not_count_as_a_fit(self):
         script = (sweep("C", [0, 90], {"A": 100, "B": 0})
@@ -498,6 +569,49 @@ class DataCheckTests(unittest.TestCase):
         # whole turns count: the same reading plotted at x = 0 instead of 360 is still clean
         check = audit_points([(0, 5.0017), (90, 0.002), (0, 4.9991)], readings, self.KNOBS)
         self.assertEqual(check["clean"], 3)
+
+    def test_gemma_plotted_its_theory_not_its_readings(self):
+        """Rounded readings that sit exactly on the curve: idealized data."""
+        from malus.audit import audit_points, needs_correction, problem_lines
+        measured = {0: 0.9981, 30: 0.7512, 60: 0.2521, 90: -0.0011, 120: 0.2494,
+                    150: 0.7499, 180: 0.9969}
+        readings = [self.reading(20, b, 0, v) for b, v in measured.items()]
+        plotted = [(0, 1.0), (30, 0.75), (60, 0.25), (90, 0.0), (120, 0.25), (150, 0.75),
+                   (180, 1.0)]
+        curve = [math.cos(math.radians(x)) ** 2 for x, _ in plotted]
+        check = audit_points(plotted, readings, self.KNOBS, curve=curve)
+        self.assertEqual((check["axis"], check["rounded"]), ("B", 7))
+        self.assertTrue(check["too_good"])
+        self.assertTrue(needs_correction(check))
+        self.assertIn("At x = 180 you plotted 1, but your reading (A = 20, B = 180, C = 0) "
+                      "was 0.9969.", problem_lines(check))
+        # the same plot with the readings copied is fine
+        honest = [(b, v) for b, v in measured.items()]
+        check = audit_points(honest, readings, self.KNOBS, curve=curve)
+        self.assertEqual((check["clean"], check["too_good"]), (7, False))
+        self.assertFalse(needs_correction(check))
+
+    def test_kimi_plotted_v_over_a_against_cos_squared(self):
+        """Values worked out from readings count as clean."""
+        from malus.audit import audit_points
+        readings = [self.reading(100, 120, 60, 1.2491), self.reading(75, 60, 20, 2.2007),
+                    self.reading(25, 30, 10, 1.1034), self.reading(50, 0, 0, 2.4979),
+                    self.reading(40, 90, 0, -0.0022)]
+        plotted = [(0.25, 0.01249), (0.5868, 0.02934), (0.883, 0.04414), (1.0, 0.04996),
+                   (0.0, -5.5e-05)]
+        check = audit_points(plotted, readings, self.KNOBS,
+                             curve=[0.05 * x for x, _ in plotted])
+        self.assertEqual((check["axis"], check["y_quantity"]), ("cos^2(B-C)", "V/A"))
+        self.assertEqual(check["clean"], 5)
+        self.assertFalse(check["too_good"])
+
+    def test_digits_as_written(self):
+        from malus.audit import half_unit, written_digits
+        self.assertEqual(written_digits(0.75), (2, 2))
+        self.assertEqual(written_digits(1.0), (0, 1))
+        self.assertEqual(written_digits(5.5e-05), (6, 2))
+        self.assertEqual(written_digits(0.0), (0, 0))
+        self.assertAlmostEqual(half_unit(3.7501), 0.00005)
 
     def test_no_exact_copies_means_no_axis_and_nothing_clean(self):
         from malus.audit import audit_points

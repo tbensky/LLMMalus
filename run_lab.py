@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from malus.apparatus import HardwareApparatus, SimulatedPolarizerApparatus, SimulationConfig  # noqa: E402
-from malus.lab import (DEFAULT_FIT_REQUEST, LabConfig, next_run_dir, run_session,  # noqa: E402
+from malus.lab import (DEFAULT_DATA_CHECK_MESSAGE, DEFAULT_FIT_REQUEST, LabConfig, next_run_dir, run_session,  # noqa: E402
                        safe_model_name, write_runs_summary)
 from malus.llm import make_client  # noqa: E402
 from malus.tools import DEFAULT_FINISH_DESCRIPTION  # noqa: E402
@@ -78,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="What the model reads about the finish tool")
     lab.add_argument("--no-fit-stage", action="store_true",
                      help="Accept the first finish; no systematic data, hand fit or plots asked for")
+    lab.add_argument("--data-check-file", default=str(HERE / "prompts" / "data_check.txt"),
+                     help="Sent instead of accepting finish when its fit plot fails the data check")
+    lab.add_argument("--no-data-check", action="store_true",
+                     help="Never refuse finish over the plot's data (it is still checked and "
+                          "recorded in the summary)")
     lab.add_argument("--out-dir", default=str(HERE / "Runs"))
     lab.add_argument("--quiet", action="store_true", help="Only print one line per run")
 
@@ -132,10 +137,15 @@ def main(argv: list[str] | None = None) -> int:
     finish_path = Path(args.finish_tool_file)
     finish_description = (finish_path.read_text(encoding="utf-8").strip()
                           if finish_path.exists() else DEFAULT_FINISH_DESCRIPTION)
+    data_check_path = Path(args.data_check_file)
+    data_check_message = (data_check_path.read_text(encoding="utf-8").strip()
+                          if data_check_path.exists() else DEFAULT_DATA_CHECK_MESSAGE)
     config = LabConfig(max_calls=args.max_calls, keep_last=args.keep_last,
                        holdout_points=args.holdout_points, threshold=args.threshold,
                        verbose=not args.quiet, fit_stage=not args.no_fit_stage,
-                       fit_request=fit_request, finish_description=finish_description)
+                       fit_request=fit_request, finish_description=finish_description,
+                       data_check=not args.no_data_check,
+                       data_check_message=data_check_message)
     model_dir = Path(args.out_dir).resolve() / safe_model_name(args.model)
     consecutive_errors = 0
 
@@ -153,12 +163,14 @@ def main(argv: list[str] | None = None) -> int:
                  "seed": seed, **bench_info,
                  "settings": {"max_calls": args.max_calls, "keep_last": args.keep_last,
                               "threshold": args.threshold, "temperature": args.temperature,
-                              "fit_stage": not args.no_fit_stage},
+                              "fit_stage": not args.no_fit_stage,
+                              "data_check": not args.no_data_check},
                  # which wording this run saw, so runs on different prompts
                  # can always be told apart
                  "prompts": {"system": system_prompt, "task": task_prompt,
                              "fit_request": None if args.no_fit_stage else fit_request,
-                             "finish_tool": finish_description}}
+                             "finish_tool": finish_description,
+                             "data_check": None if args.no_data_check else data_check_message}}
         try:
             summary = run_session(client, apparatus, system_prompt=system_prompt,
                                   task_prompt=task_prompt, folder=run_dir, config=config,

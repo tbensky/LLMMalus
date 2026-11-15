@@ -85,22 +85,33 @@ fitting) and record the constants. Its law at the first `finish` is recorded
 - **It gets a table back.** A text-only model cannot look at the PNG, so `plot`
   answers with each point next to the curve's value and the RMS difference.
   That table is its view of the graph when it adjusts its constants.
-- **Its data is checked, silently** (`malus/audit.py`). Because the model types
-  the numbers, a plot could show values it never measured, or a real reading
-  moved to the wrong settings. The model never says what its x axis is, so the
-  check infers it: the knob, or difference of two knobs (whole turns allowed for
-  B and C), that the most exactly-copied points line up with. Each point is then
-  `clean` (an exact copy, to the 4 decimals it was shown, of a reading taken at
-  that x), `moved` (an exact copy of a reading taken at other settings),
-  `rounded` (within 0.002 of a reading at that x) or `untraced` (no reading at
-  that x comes close). The counts are in each summary (`plot_points_clean` and
-  so on, out of `plot_points`), and `plots/plots.jsonl` keeps, for every point,
-  its status and the reading it came from. The model is not told. A y it derived
-  itself, such as V/A, shows as untraced; that is worth a look, not
-  automatically an error. Checked on real runs: qwen3's 13 points are all clean;
-  deepseek's "V vs A" plot (run 003) has 5 clean, 1 moved (its A = 40, B = 30
-  reading plotted as A = 30), 2 rounded and 1 untraced (A = 20, never measured
-  there).
+- **Its data is checked** (`malus/audit.py`). Because the model types the
+  numbers, a plot could show values it never measured, a real reading moved to
+  the wrong settings, or idealized values that sit on its curve. The model never
+  says what is on its axes, so the check infers them, trying every pairing of
+  an x (a knob, a difference of two knobs with whole turns allowed for B and C,
+  or cos^2 or cos of an angle or angle difference) with a y (the voltage, V/A or
+  V/(A/100)) and taking the one that accounts for the most points. Each point
+  is then `clean` (its reading at that x, copied exactly to the 4 decimals shown,
+  or worked out from it to at least 3 significant figures), `rounded` (its
+  reading at that x with fewer digits, e.g. 0.75 for 0.7512), `moved` (an exact
+  copy of a reading taken at other settings) or `untraced` (no reading at that
+  x comes close). A plot with a curve is also flagged as idealized when its
+  points lie on the curve far more closely (4x or more, in RMS) than the
+  readings they stand for, or exactly on it.
+- **Finishing on bad data is refused.** At `finish`, the last plot with a curve
+  is judged. If it has moved or untraced points, or is idealized, the finish is
+  refused with `prompts/data_check.txt` followed by the specific points (e.g.
+  "At x = 180 you plotted 1, but your reading (A = 20, B = 180, C = 0) was
+  0.9969."). Rounded points are fine. After three refusals the finish is
+  accepted anyway (`data_check: unresolved`). `--no-data-check` keeps the check
+  and its counts but never refuses.
+- **Checked on the runs so far:** qwen3 (13 points) and deepseek 003's B − C
+  plot (24) are all clean; kimi's V/A against cos^2(B − C) is recognized (12
+  clean, 2 rounded); deepseek 003's "V vs A" plot would be refused (its A = 40,
+  B = 30 reading plotted at A = 30, and a point at A = 20 it never measured);
+  gemma's plot would be refused as idealized (7 rounded points lying exactly on
+  cos^2, RMS 1e-16 against 0.0017 for its readings).
 - **When a second finish is accepted:** once at least one new plot exists
   since the request. After three finishes without a plot it is accepted anyway
   (`fit_stage: skipped`), so a stubborn model cannot loop forever.
@@ -110,7 +121,8 @@ fitting) and record the constants. Its law at the first `finish` is recorded
 
 `--no-fit-stage` turns the gate off (the first `finish` ends the run; `finish`'s
 description still asks for the fit unless you change `prompts/finish_tool.txt`),
-and `--fit-request-file` / `--finish-tool-file` point at different wording.
+and `--fit-request-file` / `--finish-tool-file` / `--data-check-file` point at
+different wording.
 
 ## What a run produces
 
@@ -140,11 +152,18 @@ a tool), `error` (the endpoint kept failing) and `interrupted` (Ctrl-C).
 `fit_stage` in each summary is `unprompted` (fitted before its first finish),
 `done` (fitted after being asked), `skipped`, `requested` (asked for the fit but
 never finished again), `not_reached` (never called finish) or `off`.
+`data_check` is `clean` (its fit plot passed the first time), `corrected`
+(passed after being refused), `unresolved` (accepted after three refusals),
+`rejected` (refused and never finished again), `not_checked` (never finished on
+a plot with a curve) or `off`; `data_refusals`, `rejected_plots`,
+`plots_idealized` and `final_plot` (the plot it was judged on, with its
+counts) go with it.
 
 `runs_summary.json` gives `discovered` (the final law passed) out of `judged`
 runs, where judged leaves out `error` and `interrupted`, plus
-`discovered_at_first_finish`, `fit_stage_done` (unprompted or after being asked)
-and `fit_done_unprompted`.
+`discovered_at_first_finish`, `fit_stage_done` (unprompted or after being asked),
+`fit_done_unprompted`, and `data_clean_first_time`, `data_corrected` and
+`data_unresolved`.
 
 ## Making the bench harder
 
@@ -196,7 +215,9 @@ malus/notebook.py     the lab notebook
 malus/llm.py          Ollama and OpenAI-compatible tool calling
 malus/lab.py          the conversation loop and run folders
 malus/evaluate.py     safe formula parsing and the final check
-prompts/              system prompt, task, finish's description, the fit request
+malus/audit.py        the data check on plotted points
+prompts/              system prompt, task, finish's description, the fit request,
+                      the data-check refusal
 tests/test_lab.py     offline tests against fake OpenAI and Ollama servers
 ```
 

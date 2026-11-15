@@ -1,0 +1,1 @@
+Before you finish: the data in your plot does not match the readings you took. A plot that proves your conclusions has to show your actual measurements (or values you computed directly from them), with your curve fitted to them by hand. Please fix the plot, taking new readings if you need to, fit your curve to the real data again, and then call finish.
