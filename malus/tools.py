@@ -356,8 +356,9 @@ class Plot(Tool):
 DEFAULT_FINISH_DESCRIPTION = (
     "Announce that you are done, once you are satisfied with your findings. Before you "
     "finish, complete the experiment the way a student does at the end of a lab: take a "
-    "systematic set of data (sweep a knob in even steps across its range while holding the "
-    "other knobs fixed), fit your law to that data by hand using plot (choose values for "
+    "set of data that you feel is appropriate to make an X/Y plot that will concretely "
+    "illustrate and prove your conclusions, fit your law to that data by hand using plot "
+    "(choose values for "
     "your constants, graph the data with your curve, adjust the constants yourself and plot "
     "again until you are satisfied; no automatic fitting), and record your final constants "
     "in your notebook. When that is done, calling finish ends the experiment."

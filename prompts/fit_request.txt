@@ -1,4 +1,4 @@
 Before you finish, please complete the experiment the way a student does at the end of a lab:
-1. Take a systematic set of data: sweep a knob in even steps across its range while holding the other knobs fixed.
+1. Take a set of data that you feel is appropriate to make an X/Y plot that will concretely illustrate and prove your conclusions.
 2. Fit your law to that data by hand. Choose values for your constants, use plot to graph the data with your curve, look at how well the curve goes through the points, then adjust the constants yourself and plot again, until you are satisfied with the fit. Do not use any automatic fitting procedure; choose the numbers yourself.
 3. Record your final constants in your notebook, then call finish again with your fitted law.

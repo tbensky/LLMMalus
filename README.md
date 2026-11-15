@@ -61,7 +61,8 @@ exactly what the model reads, look at the top of `malus/tools.py` and the files 
 ## The finish line: systematic data and a hand fit
 
 `finish`'s own description (`prompts/finish_tool.txt`) tells the model what is
-expected before it finishes: take a systematic set of data, fit the law to it
+expected before it finishes: take a set of data it judges right for an X/Y plot
+that illustrates and proves its conclusions, fit the law to it
 **by hand** (choose the constants, plot, look, adjust, plot again; no automatic
 fitting) and record the constants. Its law at the first `finish` is recorded
 (`initial_formula`) either way. What happens next depends on whether it did the fit:
