@@ -52,7 +52,7 @@ written out as JSON, just a tool's arguments (gpt-oss handed in `finish`'s
 | `write_down` | Add an entry to the lab notebook. |
 | `read_notebook` | Read back every notebook entry. |
 | `plot` | Graph its measured voltages against one knob, with the other knobs at given settings, and optionally its own curve. Saves a PNG and answers with each point next to the curve's value. |
-| `finish` | Announce it is done, with a written conclusion and the law as a Python expression in A, B and C. |
+| `finish` | Announce it is done, with a written conclusion and the law as a Python expression in A, B and C. Its description also asks for systematic data and a hand fit with `plot` before finishing (`prompts/finish_tool.txt`). |
 
 The tool descriptions say "knob" and "voltage", never light or polarizers. To see
 exactly what the model reads, look at the top of `malus/tools.py` and the files in
@@ -60,11 +60,17 @@ exactly what the model reads, look at the top of `malus/tools.py` and the files 
 
 ## The finish line: systematic data and a hand fit
 
-The model's **first** `finish` is taken to mean "I understand the knobs". Its law
-at that moment is recorded (`initial_formula`), and instead of ending, the harness
-answers with `prompts/fit_request.txt`: take a systematic set of data, fit the
-law to it **by hand** (choose the constants, plot, look, adjust, plot again; no
-automatic fitting), record the constants, then call `finish` again.
+`finish`'s own description (`prompts/finish_tool.txt`) tells the model what is
+expected before it finishes: take a systematic set of data, fit the law to it
+**by hand** (choose the constants, plot, look, adjust, plot again; no automatic
+fitting) and record the constants. Its law at the first `finish` is recorded
+(`initial_formula`) either way. What happens next depends on whether it did the fit:
+
+- **It already plotted a curve:** the finish is accepted (`fit_stage: unprompted`).
+- **It hasn't:** the harness treats the finish as "I understand the knobs" and,
+  instead of ending, answers with `prompts/fit_request.txt`, which repeats the
+  request; it then has to call `finish` again. A plot of data alone, without a
+  curve, does not count as a fit.
 
 - **The model never runs code.** `plot` is drawn by the harness: the model
   chooses the data set (which knob on the x-axis, where the others were held)
@@ -74,15 +80,16 @@ automatic fitting), record the constants, then call `finish` again.
 - **It gets a table back.** A text-only model cannot look at the PNG, so `plot`
   answers with each data point next to the curve's value and the RMS difference.
   That table is its view of the graph when it adjusts its constants.
-- **When finish is accepted:** a second `finish` is accepted once at least one
-  new plot exists. After three finishes without a plot it is accepted anyway
+- **When a second finish is accepted:** once at least one new plot exists
+  since the request. After three finishes without a plot it is accepted anyway
   (`fit_stage: skipped`), so a stubborn model cannot loop forever.
 - **Both laws are scored:** the first law and the final hand-fitted law are
   scored against the same fresh readings, so a run shows whether it understood
   the knobs and whether its fit held up.
 
-`--no-fit-stage` turns this off (the first `finish` ends the run), and
-`--fit-request-file` points at different wording.
+`--no-fit-stage` turns the gate off (the first `finish` ends the run; `finish`'s
+description still asks for the fit unless you change `prompts/finish_tool.txt`),
+and `--fit-request-file` / `--finish-tool-file` point at different wording.
 
 ## What a run produces
 
@@ -109,12 +116,14 @@ easily; cos instead of cos^2, or a law that ignores a knob, fails.
 Run statuses: `finished` (its final finish was accepted), `call_limit` (hit
 `--max-calls`, default 250), `no_tool_calls` (five replies in a row without using
 a tool), `error` (the endpoint kept failing) and `interrupted` (Ctrl-C).
-`fit_stage` in each summary is `done`, `skipped`, `requested` (asked for the fit
-but never finished again), `not_reached` (never called finish) or `off`.
+`fit_stage` in each summary is `unprompted` (fitted before its first finish),
+`done` (fitted after being asked), `skipped`, `requested` (asked for the fit but
+never finished again), `not_reached` (never called finish) or `off`.
 
 `runs_summary.json` gives `discovered` (the final law passed) out of `judged`
 runs, where judged leaves out `error` and `interrupted`, plus
-`discovered_at_first_finish` and `fit_stage_done`.
+`discovered_at_first_finish`, `fit_stage_done` (unprompted or after being asked)
+and `fit_done_unprompted`.
 
 ## Making the bench harder
 
@@ -166,7 +175,7 @@ malus/notebook.py     the lab notebook
 malus/llm.py          Ollama and OpenAI-compatible tool calling
 malus/lab.py          the conversation loop and run folders
 malus/evaluate.py     safe formula parsing and the final check
-prompts/              system prompt, task, and the fit request
+prompts/              system prompt, task, finish's description, the fit request
 tests/test_lab.py     offline tests against fake OpenAI and Ollama servers
 ```
 
