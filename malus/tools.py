@@ -351,12 +351,24 @@ class Plot(Tool):
         return ToolResult("\n".join(lines), data=record)
 
 
+# What the model reads about finish. The command line replaces it with
+# prompts/finish_tool.txt when that file exists.
+DEFAULT_FINISH_DESCRIPTION = (
+    "Announce that you are done, once you are satisfied with your findings. Before you "
+    "finish, complete the experiment the way a student does at the end of a lab: take a "
+    "systematic set of data (sweep a knob in even steps across its range while holding the "
+    "other knobs fixed), fit your law to that data by hand using plot (choose values for "
+    "your constants, graph the data with your curve, adjust the constants yourself and plot "
+    "again until you are satisfied; no automatic fitting), and record your final constants "
+    "in your notebook. When that is done, calling finish ends the experiment."
+)
+
+
 class Finish(Tool):
     name = "finish"
-    description = (
-        "Announce that you are done, once you are satisfied with your findings. "
-        "This ends the experiment."
-    )
+
+    def __init__(self, description: str | None = None):
+        self.description = description or DEFAULT_FINISH_DESCRIPTION
     parameters = {
         "type": "object",
         "properties": {
@@ -387,9 +399,9 @@ class Finish(Tool):
         )
 
 
-def default_tools(apparatus: Apparatus) -> list[Tool]:
+def default_tools(apparatus: Apparatus, finish_description: str | None = None) -> list[Tool]:
     return [SetKnobs(apparatus), ReadVoltage(apparatus), WriteDown(),
-            ReadNotebook(), Plot(apparatus), Finish()]
+            ReadNotebook(), Plot(apparatus), Finish(finish_description)]
 
 
 class Toolbox:

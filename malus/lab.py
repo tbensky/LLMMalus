@@ -68,6 +68,11 @@ class LabConfig:
     fit_stage: bool = True
     fit_request: str = DEFAULT_FIT_REQUEST
     max_finish_refusals: int = 3
+    # What the model reads about finish (None: tools.DEFAULT_FINISH_DESCRIPTION,
+    # which already asks for the systematic data and the hand fit). A model
+    # that plots a curve before its first finish has done the fit unprompted,
+    # and that finish is accepted.
+    finish_description: str | None = None
 
 
 def trim_history(messages: list[dict[str, Any]], keep_last: int) -> list[dict[str, Any]]:
@@ -116,7 +121,7 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
     say: Callable[[str], None] = print if config.verbose else (lambda _msg: None)
     notebook = Notebook(folder)
     state = LabState(apparatus=apparatus, notebook=notebook, folder=folder)
-    toolbox = Toolbox(default_tools(apparatus))
+    toolbox = Toolbox(default_tools(apparatus, config.finish_description))
     transcript = _Transcript(folder)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -184,11 +189,18 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
             if result.finished and config.fit_stage:
                 if fit_state == "not_reached":
                     initial = {**result.data, "call": call_number}
-                    fit_state = "requested"
-                    plots_at_request, readings_at_request = len(state.plots), state.readings
-                    result = ToolResult(config.fit_request, data={"fit_request": True})
-                    say(f"[fit] first finish at call {call_number}: "
-                        f"{result_formula(initial)!r}; asking for systematic data and a hand fit")
+                    if any(p.get("formula") for p in state.plots):
+                        # finish's own description asks for the hand fit;
+                        # this model did it before finishing, unasked.
+                        fit_state = "unprompted"
+                        say(f"[fit] first finish at call {call_number} came after "
+                            f"{len(state.plots)} plot(s): the hand fit was done unprompted")
+                    else:
+                        fit_state = "requested"
+                        plots_at_request, readings_at_request = len(state.plots), state.readings
+                        result = ToolResult(config.fit_request, data={"fit_request": True})
+                        say(f"[fit] first finish at call {call_number}: "
+                            f"{result_formula(initial)!r}; asking for systematic data and a hand fit")
                 elif fit_state == "requested" and len(state.plots) == plots_at_request:
                     finish_refusals += 1
                     if finish_refusals < config.max_finish_refusals:
@@ -243,9 +255,10 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
         "formula": finish_data.get("formula"),
         "nrmse": evaluation.get("nrmse") if evaluation else None,
         "r2": evaluation.get("r2") if evaluation else None,
-        # The fit stage: off, not_reached (never called finish), requested
-        # (asked for the fit, never finished), done, or skipped (finished
-        # again without plotting max_finish_refusals times).
+        # The fit stage: off, not_reached (never called finish), unprompted
+        # (plotted a curve before its first finish, as finish asks), requested
+        # (asked for the fit, never finished), done (fitted after being asked),
+        # or skipped (finished again without plotting max_finish_refusals times).
         "fit_stage": fit_state,
         "initial_formula": initial.get("formula"),
         "initial_conclusion": initial.get("conclusion"),
@@ -255,7 +268,7 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
         "plots": len(state.plots),
         "plot_files": [p["file"] for p in state.plots if p.get("file")],
         "readings_after_fit_request": (state.readings - readings_at_request
-                                       if fit_state not in {"off", "not_reached"} else None),
+                                       if fit_state in {"requested", "done", "skipped"} else None),
         "model_calls": calls_made,
         "tool_counts": dict(tool_counts),
         "readings": state.readings,
@@ -369,7 +382,8 @@ def write_runs_summary(model_dir: Path, model: str) -> dict[str, Any]:
         # The law the model gave the first time it called finish, before the
         # hand fit; and how many runs completed the fit stage.
         "discovered_at_first_finish": sum(r["initial_discovered"] for r in rows),
-        "fit_stage_done": sum(r["fit_stage"] == "done" for r in rows),
+        "fit_stage_done": sum(r["fit_stage"] in {"done", "unprompted"} for r in rows),
+        "fit_done_unprompted": sum(r["fit_stage"] == "unprompted" for r in rows),
         "statuses": dict(sorted(statuses.items())),
         "median_calls_when_discovered": statistics.median(calls) if calls else None,
         "run_list": rows,

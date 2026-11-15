@@ -391,6 +391,37 @@ class PlotAndFitTests(unittest.TestCase):
         self.assertIn("<circle", path.read_text())
 
 
+    def test_a_hand_fit_before_the_first_finish_is_accepted_unprompted(self):
+        """finish's description asks for the fit; a model that does it first is done."""
+        script = (sweep("C", [0, 45, 90, 135, 180], {"A": 100, "B": 0})
+                  + [("tools", [("plot", {"x": "C", "fixed": {"A": 100, "B": 0},
+                                          "formula": "5*cos(radians(C - B))**2"})]),
+                     ("tools", [("finish", {"conclusion": "fitted", "formula": FIRST_GUESS})])])
+        summary, shown = self.session(script)
+        self.assertEqual((summary["status"], summary["fit_stage"]), ("finished", "unprompted"))
+        self.assertFalse(any("Before you finish" in t for t in shown))   # no request sent
+        self.assertTrue(summary["discovered"])
+        self.assertIsNone(summary["readings_after_fit_request"])
+
+    def test_a_data_only_plot_does_not_count_as_a_fit(self):
+        script = (sweep("C", [0, 90], {"A": 100, "B": 0})
+                  + [("tools", [("plot", {"x": "C", "fixed": {"A": 100, "B": 0}})]),
+                     ("tools", [("finish", {"conclusion": "x", "formula": FIRST_GUESS})])])
+        summary, _ = self.session(script, max_calls=4)
+        self.assertEqual(summary["fit_stage"], "requested")
+
+    def test_finish_reads_the_configured_description(self):
+        from malus.tools import DEFAULT_FINISH_DESCRIPTION
+        server = FakeModelServer("openai", [("text", "hm")])
+        self.addCleanup(server.close)
+        run_session(make_client("nrp", "m", url=server.url), SimulatedPolarizerApparatus(),
+                    system_prompt="s", task_prompt="t",
+                    config=LabConfig(verbose=False, max_calls=1, finish_description="Say done."))
+        finish = [t["function"] for t in server.requests[0]["tools"]
+                  if t["function"]["name"] == "finish"][0]
+        self.assertEqual(finish["description"], "Say done.")
+        self.assertIn("by hand using plot", DEFAULT_FINISH_DESCRIPTION)
+
 class CommandLineTests(unittest.TestCase):
     def test_numbered_runs_and_runs_summary(self):
         import run_lab
