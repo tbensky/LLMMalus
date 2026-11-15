@@ -7,10 +7,16 @@ a photodetector, so the signal follows Malus's law:
 
 The model is told none of that. It gets this task and nothing else:
 
-> You have 3 knobs. One goes from 0 to 100; the other two rotate continuously.
-> Depending on your knob settings, you'll get a single output voltage, which is
-> your signal. There is a law of physics here, and I want you to discover what
-> mathematical form it has.
+> You have 3 knobs. One goes from 0 to 100, the other are continuously
+> rotateable. Depending on your knob settings, you'll get a single output
+> voltage, which is your signal. There is a law of physics here, and I want you
+> to discover what mathematical form it has. You have a lab notebook you can use
+> to record things you find. Use "write_down(...)" to record whatever you wish.
+> To read it back at any time, use "read_notebook. You are to work by yourself,
+> with no internet searches and you cannot ask questions. Just figure it all out
+> for yourself.
+
+(The exact text is in `prompts/task.txt`.)
 
 It works the bench through tools, keeps a lab notebook, and says when it is done.
 Its law is then checked against fresh readings at knob settings it never chose.
