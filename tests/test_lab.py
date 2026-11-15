@@ -403,11 +403,14 @@ class PlotAndFitTests(unittest.TestCase):
         real = [[c, round(m["mean"], 4)] for c, m in zip((0, 45, 90), state.measurements)]
         result = tools.run(state, "plot", {"points": real + [[135, 2.6]],   # 2.6 never read
                                            "formula": "5*cos(radians(x))**2"})
-        self.assertEqual(result.data["traced_points"], 3)
+        self.assertEqual((result.data["clean"], result.data["untraced"]), (3, 1))
         self.assertEqual(result.data["points"], 4)
-        self.assertNotIn("trace", result.text.lower())          # the model is not told
+        for word in ("clean", "untraced", "moved", "rounded"):   # the model is not told
+            self.assertNotIn(word, result.text.lower())
         saved = json.loads((self.folder / "plots" / "plots.jsonl").read_text())
-        self.assertEqual(saved["traced_points"], 3)
+        self.assertEqual([c["status"] for c in saved["check"]],
+                         ["clean", "clean", "clean", "untraced"])
+        self.assertEqual(saved["check"][1]["source"]["C"], 45.0)  # where the value came from
 
     def test_plots_fall_back_to_svg_without_matplotlib(self):
         from unittest.mock import patch
@@ -432,7 +435,8 @@ class PlotAndFitTests(unittest.TestCase):
         self.assertTrue(summary["discovered"])
         self.assertIsNone(summary["readings_after_fit_request"])
         self.assertEqual(summary["plot_points"], 7)
-        self.assertLessEqual(summary["plot_points_traced"], 7)
+        self.assertEqual(sum(summary[f"plot_points_{k}"]
+                             for k in ("clean", "moved", "rounded", "untraced")), 7)
 
     def test_a_data_only_plot_does_not_count_as_a_fit(self):
         script = (sweep("C", [0, 90], {"A": 100, "B": 0})
@@ -452,6 +456,100 @@ class PlotAndFitTests(unittest.TestCase):
                   if t["function"]["name"] == "finish"][0]
         self.assertEqual(finish["description"], "Say done.")
         self.assertIn("by hand using plot", DEFAULT_FINISH_DESCRIPTION)
+
+
+class DataCheckTests(unittest.TestCase):
+    """audit.audit_points: is each plotted point a reading taken at that x?"""
+
+    KNOBS = SimulatedPolarizerApparatus().knobs
+
+    @staticmethod
+    def reading(a, b, c, mean):
+        return {"settings": {"A": a, "B": b, "C": c}, "mean": mean}
+
+    def test_deepseek_run_003_mix_up_is_recognized(self):
+        """Its 'V vs A at B=C' plot: real readings, one moved, one invented."""
+        from malus.audit import audit_points
+        readings = [self.reading(*r) for r in (
+            (0, 0, 0, 0.0018), (10, 0, 0, 0.50149), (40, 0, 0, 2.0011), (50, 0, 0, 2.4979),
+            (60, 0, 0, 2.99938), (75, 0, 0, 3.7501), (100, 0, 0, 4.9987),
+            (20, 30, 0, 0.7519), (40, 30, 0, 1.50152), (60, 30, 0, 2.2487))]
+        plotted = [(0, 0.0), (10, 0.5015), (20, 1.002), (30, 1.5015), (40, 2.0011),
+                   (50, 2.499), (60, 2.9994), (75, 3.7501), (100, 4.9987)]
+        check = audit_points(plotted, readings, self.KNOBS)
+        self.assertEqual(check["axis"], "A")
+        status = {row["x"]: row["status"] for row in check["points"]}
+        self.assertEqual(status[30], "moved")          # the A = 40, B = 30 reading
+        self.assertEqual(status[20], "untraced")       # never measured at A = 20, B = C
+        self.assertEqual((status[0], status[50]), ("rounded", "rounded"))
+        self.assertEqual((check["clean"], check["moved"], check["rounded"], check["untraced"]),
+                         (5, 1, 2, 1))
+        moved = next(r for r in check["points"] if r["x"] == 30)
+        self.assertEqual((moved["source"]["A"], moved["source"]["B"]), (40, 30))
+
+    def test_the_axis_can_be_a_difference_of_two_rotating_knobs(self):
+        """deepseek plotted against B - C with C = 20; 360 came from B = 380."""
+        from malus.audit import audit_points
+        readings = [self.reading(100, 20, 20, 5.0017), self.reading(100, 110, 20, 0.0020),
+                    self.reading(100, 380, 20, 4.9991)]
+        check = audit_points([(0, 5.0017), (90, 0.002), (360, 4.9991)], readings, self.KNOBS)
+        self.assertEqual(check["axis"], "B-C")
+        self.assertEqual(check["clean"], 3)
+        # whole turns count: the same reading plotted at x = 0 instead of 360 is still clean
+        check = audit_points([(0, 5.0017), (90, 0.002), (0, 4.9991)], readings, self.KNOBS)
+        self.assertEqual(check["clean"], 3)
+
+    def test_no_exact_copies_means_no_axis_and_nothing_clean(self):
+        from malus.audit import audit_points
+        check = audit_points([(1, 7.0), (2, 8.0)], [self.reading(100, 0, 0, 5.0)], self.KNOBS)
+        self.assertIsNone(check["axis"])
+        self.assertEqual(check["untraced"], 2)
+
+
+class RetryTests(unittest.TestCase):
+    def failing_server(self, failures):
+        class Handler(BaseHTTPRequestHandler):
+            seen = 0
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                Handler.seen += 1
+                if Handler.seen <= failures:
+                    self.send_response(500)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        return f"http://127.0.0.1:{httpd.server_address[1]}/v1/chat/completions"
+
+    def test_eight_attempts_with_waits_capped_at_thirty_seconds(self):
+        from unittest.mock import patch
+        from malus import llm
+        waits = []
+        with patch.object(llm.time, "sleep", waits.append), patch("builtins.print"):
+            reply = make_client("nrp", "m", url=self.failing_server(6)).chat([], [])
+        self.assertEqual(reply.text, "ok")
+        self.assertEqual(waits, [2, 4, 8, 16, 30, 30])
+
+    def test_giving_up_after_the_last_attempt(self):
+        from unittest.mock import patch
+        from malus import llm
+        with patch.object(llm.time, "sleep", lambda _s: None), patch("builtins.print"):
+            client = make_client("nrp", "m", url=self.failing_server(10), attempts=3)
+            with self.assertRaises(llm.LLMError):
+                client.chat([], [])
 
 class CommandLineTests(unittest.TestCase):
     def test_numbered_runs_and_runs_summary(self):

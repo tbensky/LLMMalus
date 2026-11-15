@@ -220,22 +220,23 @@ class Plot(Tool):
     PNG, so the table is how it "sees" whether the curve goes through the
     points.
 
-    Because the model now types the numbers, a plot could show values it
-    never measured. Each plot is therefore audited silently (the model is
-    not told): every y value is compared with the readings the lab actually
-    took, and the count that match is kept in plots.jsonl and the summary.
-    A y the model derived itself (V/A, a normalized value...) will not
-    match a raw reading; that is a choice to look at, not an error.
+    Because the model types the numbers, a plot could show values it never
+    measured, or a real reading moved to the wrong settings. Each plot is
+    therefore checked silently (the model is not told) by audit.audit_points:
+    every point is clean, moved, rounded or untraced, and the counts and the
+    reading each point came from are kept in plots.jsonl and the summary.
+    A y the model derived itself (V/A, a normalized value...) will show as
+    untraced; that is a choice to look at, not an error.
     """
 
     name = "plot"
     MAX_POINTS = 500
     MAX_ROWS = 50
     CURVE_POINTS = 241
-    TRACE_TOLERANCE = 0.001        # how close a y must be to a recorded reading
 
     def __init__(self, apparatus: Apparatus):
         self.units = apparatus.signal_units
+        self.knobs = apparatus.knobs
         self.description = (
             "Make an X/Y graph from data you supply, and optionally draw your own curve "
             "through it, the way you would make a plot in a spreadsheet. You choose what goes "
@@ -292,6 +293,7 @@ class Plot(Tool):
         return points, None
 
     def run(self, state: LabState, args: dict[str, Any]) -> ToolResult:
+        from .audit import audit_points
         from .evaluate import FormulaError, compile_formula
         from .plotting import render
 
@@ -321,9 +323,7 @@ class Plot(Tool):
         except (ArithmeticError, ValueError, TypeError) as exc:
             return ToolResult(f"Your formula failed to evaluate: {exc}")
 
-        recorded = [m["mean"] for m in state.measurements]
-        traced = sum(1 for _, y in points
-                     if any(abs(y - r) <= self.TRACE_TOLERANCE for r in recorded))
+        check = audit_points(points, state.measurements, self.knobs)
 
         number = len(state.plots) + 1
         x_label = str(args.get("x_label") or "").strip() or "x"
@@ -339,11 +339,15 @@ class Plot(Tool):
         rms = math.sqrt(sum(r * r for r in residuals) / len(residuals)) if residuals else None
         record = {"number": number, "call": state.call, "formula": formula, "title": title,
                   "x_label": x_label, "y_label": y_label, "points": len(points),
-                  "traced_points": traced, "rms": rms, "file": saved.name if saved else None}
+                  "rms": rms, "file": saved.name if saved else None,
+                  # the silent data check (audit.py); never shown to the model
+                  "axis": check["axis"], "clean": check["clean"], "moved": check["moved"],
+                  "rounded": check["rounded"], "untraced": check["untraced"]}
         state.plots.append(record)
         if state.folder is not None:
             with (state.folder / "plots" / "plots.jsonl").open("a", encoding="utf-8") as f:
-                f.write(json.dumps({**record, "data": rows}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({**record, "data": rows, "check": check["points"]},
+                                   ensure_ascii=False) + "\n")
 
         # Show 0 instead of floating-point dust such as -4.4e-16, judged
         # against the size of the data itself.

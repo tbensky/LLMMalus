@@ -27,6 +27,11 @@ from typing import Any
 from .tools import parse_arguments
 
 RETRY_STATUSES = {429, 500, 502, 503, 504}
+# NRP's qwen3 endpoint answered HTTP 500 about 30 times in one 57-call run,
+# once four times in a row; 5 attempts nearly ended that run. 8 attempts with
+# waits of 2, 4, 8, 16, 30, 30, 30 s ride out about two minutes of trouble.
+DEFAULT_ATTEMPTS = 8
+MAX_RETRY_DELAY = 30
 
 
 class LLMError(RuntimeError):
@@ -53,7 +58,7 @@ class Reply:
 
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
-               timeout: float, attempts: int = 5) -> dict[str, Any]:
+               timeout: float, attempts: int = DEFAULT_ATTEMPTS) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     last_error = ""
     for attempt in range(attempts):
@@ -72,7 +77,7 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
         except (TimeoutError, socket.timeout, urllib.error.URLError, ConnectionError) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
         if attempt < attempts - 1:
-            delay = 2 ** (attempt + 1)
+            delay = min(MAX_RETRY_DELAY, 2 ** (attempt + 1))
             print(f"  [retry] attempt {attempt + 1} failed ({last_error}); waiting {delay}s")
             time.sleep(delay)
     raise LLMError(f"Giving up on {url} after {attempts} attempts: {last_error}")
@@ -163,11 +168,12 @@ class ChatClient:
     provider = "base"
 
     def __init__(self, url: str, model: str, temperature: float | None = None,
-                 timeout: float = 300.0):
+                 timeout: float = 300.0, attempts: int = DEFAULT_ATTEMPTS):
         self.url = url
         self.model = model
         self.temperature = temperature
         self.timeout = timeout
+        self.attempts = max(1, attempts)
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> Reply:
         raise NotImplementedError
@@ -193,7 +199,7 @@ class OpenAICompatibleClient(ChatClient):
         if self.temperature is not None:
             payload["temperature"] = self.temperature
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        data = _post_json(self.url, payload, headers, self.timeout)
+        data = _post_json(self.url, payload, headers, self.timeout, self.attempts)
         try:
             message = data["choices"][0]["message"]
         except (KeyError, IndexError, TypeError):
@@ -257,7 +263,7 @@ class OllamaClient(ChatClient):
             payload["options"] = options
         if self.think is not None:
             payload["think"] = self.think
-        data = _post_json(self.url, payload, {}, self.timeout)
+        data = _post_json(self.url, payload, {}, self.timeout, self.attempts)
         message = data.get("message") or {}
         text = message.get("content") or ""
         calls = []
@@ -292,13 +298,14 @@ DEFAULT_URLS = {
 def make_client(provider: str, model: str, url: str | None = None,
                 api_key: str | None = None, temperature: float | None = None,
                 num_ctx: int | None = 16384, think: bool | None = None,
-                timeout: float = 300.0) -> ChatClient:
+                timeout: float = 300.0, attempts: int = DEFAULT_ATTEMPTS) -> ChatClient:
     provider = provider.lower()
     if provider == "ollama":
         return OllamaClient(url or DEFAULT_URLS["ollama"], model, num_ctx=num_ctx,
-                            think=think, temperature=temperature, timeout=timeout)
+                            think=think, temperature=temperature, timeout=timeout,
+                            attempts=attempts)
     if provider in {"nrp", "openai", "deepseek"}:
         return OpenAICompatibleClient(url or DEFAULT_URLS.get(provider, DEFAULT_URLS["nrp"]),
-                                      model, api_key=api_key,
-                                      temperature=temperature, timeout=timeout)
+                                      model, api_key=api_key, temperature=temperature,
+                                      timeout=timeout, attempts=attempts)
     raise ValueError(f"Unknown provider {provider!r}: use ollama, nrp or openai")

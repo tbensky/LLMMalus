@@ -267,11 +267,12 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
         "initial_nrmse": initial_evaluation.get("nrmse") if initial_evaluation else None,
         "plots": len(state.plots),
         "plot_files": [p["file"] for p in state.plots if p.get("file")],
-        # The model types its plot data itself. These count its plotted points
-        # and how many have a y within 0.001 of a reading it actually took
-        # (a derived quantity such as V/A will not match a raw reading).
+        # The model types its plot data itself; audit.py sorts every plotted
+        # point into clean (an exact copy of a reading at that x), moved (an
+        # exact copy of a reading from other settings), rounded or untraced.
         "plot_points": sum(p["points"] for p in state.plots),
-        "plot_points_traced": sum(p["traced_points"] for p in state.plots),
+        **{f"plot_points_{kind}": sum(p[kind] for p in state.plots)
+           for kind in ("clean", "moved", "rounded", "untraced")},
         "readings_after_fit_request": (state.readings - readings_at_request
                                        if fit_state in {"requested", "done", "skipped"} else None),
         "model_calls": calls_made,
@@ -364,7 +365,9 @@ def write_runs_summary(model_dir: Path, model: str) -> dict[str, Any]:
             "fit_stage": s.get("fit_stage"),
             "plots": s.get("plots"),
             "plot_points": s.get("plot_points"),
-            "plot_points_traced": s.get("plot_points_traced"),
+            "plot_points_clean": s.get("plot_points_clean"),
+            "plot_points_moved": s.get("plot_points_moved"),
+            "plot_points_untraced": s.get("plot_points_untraced"),
             "model_calls": s.get("model_calls"),
             "readings": s.get("readings"),
             "notebook_entries": s.get("notebook_entries"),

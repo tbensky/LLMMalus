@@ -55,6 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
     llm.add_argument("--think", choices=("on", "off"), default=None,
                      help="Ollama only: turn a thinking model's thinking on or off")
     llm.add_argument("--timeout", type=float, default=300.0, help="Seconds per model call")
+    llm.add_argument("--retries", type=int, default=8,
+                     help="Attempts per model call when the host errors (waits 2, 4, 8, 16, "
+                          "then 30 s); after the last one the run ends with status error")
 
     lab = p.add_argument_group("session")
     lab.add_argument("--runs", type=int, default=1, help="Independent runs to do in a row")
@@ -121,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
     think = None if args.think is None else args.think == "on"
     client = make_client(args.provider, args.model, url=args.llm_url,
                          api_key=args.llm_api_key or None, temperature=args.temperature,
-                         num_ctx=args.num_ctx, think=think, timeout=args.timeout)
+                         num_ctx=args.num_ctx, think=think, timeout=args.timeout,
+                         attempts=args.retries)
     fit_request_path = Path(args.fit_request_file)
     fit_request = (fit_request_path.read_text(encoding="utf-8").strip()
                    if fit_request_path.exists() else DEFAULT_FIT_REQUEST)

@@ -43,6 +43,10 @@ written out as JSON, just a tool's arguments (gpt-oss handed in `finish`'s
 `{"conclusion": ..., "formula": ...}` this way), or gpt-oss's own
 `to=functions.read_voltage` syntax leaking through the host.
 
+When the host errors (HTTP 429 or 5xx, or a timeout) a model call is retried up to
+8 times, waiting 2, 4, 8, 16 and then 30 seconds (`--retries`). After the last
+attempt the run ends with status `error`, which `runs_summary.json` leaves out.
+
 ## The tools
 
 | Tool | What it does |
@@ -81,13 +85,22 @@ fitting) and record the constants. Its law at the first `finish` is recorded
 - **It gets a table back.** A text-only model cannot look at the PNG, so `plot`
   answers with each point next to the curve's value and the RMS difference.
   That table is its view of the graph when it adjusts its constants.
-- **Its data is checked, silently.** Because the model types the numbers, a plot
-  could show values it never measured. Each plot's y values are compared with
-  the readings the lab actually took (within 0.001), and the count that match is
-  kept in `plots/plots.jsonl` (`traced_points`) and the summary
-  (`plot_points_traced` of `plot_points`). The model is not told. A y it derived
-  itself, such as V/A, will not match a raw reading; that is worth a look, not
-  automatically an error.
+- **Its data is checked, silently** (`malus/audit.py`). Because the model types
+  the numbers, a plot could show values it never measured, or a real reading
+  moved to the wrong settings. The model never says what its x axis is, so the
+  check infers it: the knob, or difference of two knobs (whole turns allowed for
+  B and C), that the most exactly-copied points line up with. Each point is then
+  `clean` (an exact copy, to the 4 decimals it was shown, of a reading taken at
+  that x), `moved` (an exact copy of a reading taken at other settings),
+  `rounded` (within 0.002 of a reading at that x) or `untraced` (no reading at
+  that x comes close). The counts are in each summary (`plot_points_clean` and
+  so on, out of `plot_points`), and `plots/plots.jsonl` keeps, for every point,
+  its status and the reading it came from. The model is not told. A y it derived
+  itself, such as V/A, shows as untraced; that is worth a look, not
+  automatically an error. Checked on real runs: qwen3's 13 points are all clean;
+  deepseek's "V vs A" plot (run 003) has 5 clean, 1 moved (its A = 40, B = 30
+  reading plotted as A = 30), 2 rounded and 1 untraced (A = 20, never measured
+  there).
 - **When a second finish is accepted:** once at least one new plot exists
   since the request. After three finishes without a plot it is accepted anyway
   (`fit_stage: skipped`), so a stubborn model cannot loop forever.
