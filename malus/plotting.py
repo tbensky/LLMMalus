@@ -28,7 +28,7 @@ def render(path_stem: Path, *, x_label: str, y_label: str, title: str,
         ax.plot([c[0] for c in curve], [c[1] for c in curve], color="#2a78d6",
                 linewidth=2, label=curve_label or "fit", zorder=2)
     ax.scatter([p[0] for p in points], [p[1] for p in points], s=28, color="#111111",
-               edgecolor="white", linewidth=0.8, label="measured", zorder=3)
+               edgecolor="white", linewidth=0.8, label="data", zorder=3)
     ax.set_xlabel(x_label)
     ax.set_ylabel(y_label)
     ax.set_title(title, fontsize=11)

@@ -295,6 +295,10 @@ def sweep(knob, values, fixed):
             for v in values]
 
 
+# What a scripted model types into plot: its C sweep as [x, y] pairs.
+SWEEP_POINTS = [[0, 5.0], [30, 3.75], [60, 1.25], [90, 0.0], [120, 1.25], [150, 3.75],
+                [180, 5.0]]
+
 DISCOVER = [
     ("tools", [("set_knobs", {"A": 100, "B": 0, "C": 0}), ("read_voltage", {})]),
     ("tools", [("set_knobs", {"C": 90}), ("read_voltage", {})]),
@@ -326,10 +330,10 @@ class PlotAndFitTests(unittest.TestCase):
                   + [("tools", [("finish", {"conclusion": "cos^2", "formula": FIRST_GUESS})])]
                   + [("tools", [("finish", {"conclusion": "again", "formula": FIRST_GUESS})])]
                   + sweep("C", [0, 30, 60, 90, 120, 150, 180], {"A": 100, "B": 0})
-                  + [("tools", [("plot", {"x": "C", "fixed": {"A": 100, "B": 0},
-                                          "formula": "4*cos(radians(C - B))**2"})]),
-                     ("tools", [("plot", {"x": "C", "fixed": {"A": 100, "B": 0},
-                                          "formula": "5*cos(radians(C - B))**2"})]),
+                  + [("tools", [("plot", {"points": SWEEP_POINTS, "x_label": "C (deg)",
+                                          "formula": "4*cos(radians(x))**2"})]),
+                     ("tools", [("plot", {"points": SWEEP_POINTS, "x_label": "C (deg)",
+                                          "formula": "5*cos(radians(x))**2"})]),
                      ("tools", [("finish", {"conclusion": "fitted",
                                             "formula": "0.05*A*cos(radians(C - B))**2"})])])
         summary, shown = self.session(script)
@@ -342,8 +346,9 @@ class PlotAndFitTests(unittest.TestCase):
         self.assertTrue(any("Before you finish" in t for t in shown))        # the request
         self.assertTrue(any(t.startswith("Before finishing") for t in shown))  # the reminder
         bad_fit, good_fit = [t for t in shown if t.startswith("Plot ")]
-        self.assertIn("C = 30: measured 3.7", good_fit)
-        self.assertIn("your curve 3.7500", good_fit)
+        self.assertIn("Plot 2: 7 points, y against C (deg), with your curve.", good_fit)
+        self.assertIn("x = 30: y = 3.75, your curve 3.75, difference +0", good_fit)
+        self.assertIn("x = 30: y = 3.75, your curve 3, difference +0.75", bad_fit)
         rms = lambda text: float(text.rsplit(": ", 1)[1].split()[0])   # noqa: E731
         self.assertGreater(rms(bad_fit), 10 * rms(good_fit))
         for name in summary["plot_files"]:
@@ -364,21 +369,45 @@ class PlotAndFitTests(unittest.TestCase):
         self.assertTrue(summary["initial_discovered"])
         self.assertFalse(summary["discovered"])          # never handed in a final law
 
-    def test_plot_only_uses_readings_actually_taken(self):
-        script = (sweep("B", [0, 45, 90], {"A": 100, "C": 0})
-                  + [("tools", [("plot", {"x": "B", "fixed": {"A": 50, "C": 0}})])]
-                  + [("tools", [("plot", {"x": "B", "fixed": {"A": 100}})])]
-                  + [("tools", [("plot", {"x": "B", "fixed": {"A": 100, "C": 0}})])]
-                  + [("tools", [("plot", {"x": "B", "fixed": {"A": 100, "C": 0},
-                                          "formula": "import os"})])])
+    def test_plot_takes_the_models_points_and_refuses_bad_ones(self):
+        script = [("tools", [("plot", {"points": []})]),
+                  ("tools", [("plot", {"points": [[1, 2, 3]]})]),
+                  ("tools", [("plot", {"points": [[0, "high"]]})]),
+                  ("tools", [("plot", {"points": [[0, 1], [1, 3]], "formula": "2*B + 1"})]),
+                  ("tools", [("plot", {"points": [{"x": 0, "y": 1}, {"x": 1, "y": 3},
+                                                  {"x": 2, "y": 5}]})]),
+                  ("tools", [("plot", {"points": [[2, 5], [0, 1], [1, 3]],
+                                       "formula": "2*x + 1", "y_label": "V"})])]
         # one call more than the script, so the last result reaches a request
-        summary, shown = self.session(script, max_calls=8, fit_stage=False)
-        self.assertIn("You have no readings with A = 50, C = 0", shown[6])
-        self.assertIn("fixed is missing C", shown[7])
-        self.assertIn("Plot 1: 3 readings", shown[8])
-        self.assertIn("data only", shown[8])
-        self.assertIn("could not be used", shown[9])
-        self.assertEqual(summary["plots"], 1)
+        summary, shown = self.session(script, max_calls=7, fit_stage=False)
+        self.assertIn("non-empty list", shown[0])
+        self.assertIn("must be an [x, y] pair", shown[1])
+        self.assertIn("must be two numbers", shown[2])
+        self.assertIn("written in terms of x", shown[3])
+        self.assertIn("Plot 1: 3 points, y against x, data only.", shown[4])   # {"x","y"} form
+        self.assertIn("x = 0: y = 1, your curve 1, difference +0", shown[5])  # sorted by x
+        self.assertIn("Root-mean-square difference between your curve and the data: 0", shown[5])
+        self.assertEqual(summary["plots"], 2)
+
+    def test_plotted_points_are_checked_against_real_readings(self):
+        """The model types its plot data; the harness counts, silently, how
+        many y values match a reading it actually took."""
+        from malus.notebook import Notebook
+        from malus.tools import LabState, Toolbox, default_tools
+        bench = SimulatedPolarizerApparatus(seed=2)
+        state = LabState(apparatus=bench, notebook=Notebook(), folder=self.folder)
+        tools = Toolbox(default_tools(bench))
+        for c in (0, 45, 90):
+            tools.run(state, "set_knobs", {"A": 100, "B": 0, "C": c})
+            tools.run(state, "read_voltage", {})
+        real = [[c, round(m["mean"], 4)] for c, m in zip((0, 45, 90), state.measurements)]
+        result = tools.run(state, "plot", {"points": real + [[135, 2.6]],   # 2.6 never read
+                                           "formula": "5*cos(radians(x))**2"})
+        self.assertEqual(result.data["traced_points"], 3)
+        self.assertEqual(result.data["points"], 4)
+        self.assertNotIn("trace", result.text.lower())          # the model is not told
+        saved = json.loads((self.folder / "plots" / "plots.jsonl").read_text())
+        self.assertEqual(saved["traced_points"], 3)
 
     def test_plots_fall_back_to_svg_without_matplotlib(self):
         from unittest.mock import patch
@@ -394,18 +423,20 @@ class PlotAndFitTests(unittest.TestCase):
     def test_a_hand_fit_before_the_first_finish_is_accepted_unprompted(self):
         """finish's description asks for the fit; a model that does it first is done."""
         script = (sweep("C", [0, 45, 90, 135, 180], {"A": 100, "B": 0})
-                  + [("tools", [("plot", {"x": "C", "fixed": {"A": 100, "B": 0},
-                                          "formula": "5*cos(radians(C - B))**2"})]),
+                  + [("tools", [("plot", {"points": SWEEP_POINTS,
+                                          "formula": "5*cos(radians(x))**2"})]),
                      ("tools", [("finish", {"conclusion": "fitted", "formula": FIRST_GUESS})])])
         summary, shown = self.session(script)
         self.assertEqual((summary["status"], summary["fit_stage"]), ("finished", "unprompted"))
         self.assertFalse(any("Before you finish" in t for t in shown))   # no request sent
         self.assertTrue(summary["discovered"])
         self.assertIsNone(summary["readings_after_fit_request"])
+        self.assertEqual(summary["plot_points"], 7)
+        self.assertLessEqual(summary["plot_points_traced"], 7)
 
     def test_a_data_only_plot_does_not_count_as_a_fit(self):
         script = (sweep("C", [0, 90], {"A": 100, "B": 0})
-                  + [("tools", [("plot", {"x": "C", "fixed": {"A": 100, "B": 0}})]),
+                  + [("tools", [("plot", {"points": SWEEP_POINTS[:3]})]),
                      ("tools", [("finish", {"conclusion": "x", "formula": FIRST_GUESS})])])
         summary, _ = self.session(script, max_calls=4)
         self.assertEqual(summary["fit_stage"], "requested")

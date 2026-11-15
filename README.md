@@ -51,7 +51,7 @@ written out as JSON, just a tool's arguments (gpt-oss handed in `finish`'s
 | `read_voltage` | Read the voltage at the current settings, optionally averaging up to 20 readings. |
 | `write_down` | Add an entry to the lab notebook. |
 | `read_notebook` | Read back every notebook entry. |
-| `plot` | Graph its measured voltages against one knob, with the other knobs at given settings, and optionally its own curve. Saves a PNG and answers with each point next to the curve's value. |
+| `plot` | Graph a list of (x, y) points it supplies itself, like making a plot in a spreadsheet, optionally with its own curve written in terms of x. Saves a PNG and answers with each point next to the curve's value. |
 | `finish` | Announce it is done, with a written conclusion and the law as a Python expression in A, B and C. Its description also asks for systematic data and a hand fit with `plot` before finishing (`prompts/finish_tool.txt`). |
 
 The tool descriptions say "knob" and "voltage", never light or polarizers. To see
@@ -73,14 +73,21 @@ fitting) and record the constants. Its law at the first `finish` is recorded
   request; it then has to call `finish` again. A plot of data alone, without a
   curve, does not count as a fit.
 
-- **The model never runs code.** `plot` is drawn by the harness: the model
-  chooses the data set (which knob on the x-axis, where the others were held)
-  and its curve with its hand-picked constants.
-- **Only real data is plotted.** The points come from the lab's own record of
-  `read_voltage` results, never from numbers the model types in.
+- **The model never runs code.** `plot` is drawn by the harness. The model
+  sends a list of `[x, y]` points it took from its own work, axis labels, and
+  optionally a curve: a Python expression in `x` with its hand-picked constants,
+  e.g. `3.7*cos(radians(x + 25))**2`. It decides what goes on each axis, so it can
+  plot voltage against a knob, against B − C, or anything it derives.
 - **It gets a table back.** A text-only model cannot look at the PNG, so `plot`
-  answers with each data point next to the curve's value and the RMS difference.
+  answers with each point next to the curve's value and the RMS difference.
   That table is its view of the graph when it adjusts its constants.
+- **Its data is checked, silently.** Because the model types the numbers, a plot
+  could show values it never measured. Each plot's y values are compared with
+  the readings the lab actually took (within 0.001), and the count that match is
+  kept in `plots/plots.jsonl` (`traced_points`) and the summary
+  (`plot_points_traced` of `plot_points`). The model is not told. A y it derived
+  itself, such as V/A, will not match a raw reading; that is worth a look, not
+  automatically an error.
 - **When a second finish is accepted:** once at least one new plot exists
   since the request. After three finishes without a plot it is accepted anyway
   (`fit_stage: skipped`), so a stubborn model cannot loop forever.

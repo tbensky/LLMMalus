@@ -267,6 +267,11 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
         "initial_nrmse": initial_evaluation.get("nrmse") if initial_evaluation else None,
         "plots": len(state.plots),
         "plot_files": [p["file"] for p in state.plots if p.get("file")],
+        # The model types its plot data itself. These count its plotted points
+        # and how many have a y within 0.001 of a reading it actually took
+        # (a derived quantity such as V/A will not match a raw reading).
+        "plot_points": sum(p["points"] for p in state.plots),
+        "plot_points_traced": sum(p["traced_points"] for p in state.plots),
         "readings_after_fit_request": (state.readings - readings_at_request
                                        if fit_state in {"requested", "done", "skipped"} else None),
         "model_calls": calls_made,
@@ -358,6 +363,8 @@ def write_runs_summary(model_dir: Path, model: str) -> dict[str, Any]:
             "initial_formula": s.get("initial_formula"),
             "fit_stage": s.get("fit_stage"),
             "plots": s.get("plots"),
+            "plot_points": s.get("plot_points"),
+            "plot_points_traced": s.get("plot_points_traced"),
             "model_calls": s.get("model_calls"),
             "readings": s.get("readings"),
             "notebook_entries": s.get("notebook_entries"),
