@@ -1,0 +1,1 @@
+You are working alone at a lab bench. You can only interact with the apparatus through your tools. Take as many measurements as you need. When you are satisfied with your findings, call finish.

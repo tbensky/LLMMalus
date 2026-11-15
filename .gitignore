@@ -1,0 +1,7 @@
+Runs/
+__pycache__/
+*.pyc
+.DS_Store
+# local secrets, e.g. a file holding LLM_API_KEY
+.env
+.env.*
