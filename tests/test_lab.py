@@ -223,7 +223,7 @@ class SessionTests(unittest.TestCase):
         # what the model was shown, in order
         tool_texts = [m["content"] for m in server.requests[-1]["messages"] if m["role"] == "tool"]
         self.assertIn("Knobs now: A = 100, B = 0, C = 0.", tool_texts[0])
-        self.assertRegex(tool_texts[3], r"^At A = 100, B = 0, C = 0: \d\.\d{4} V$")
+        self.assertRegex(tool_texts[3], r"^\d\.\d{4} V$")        # the reading, nothing else
         self.assertRegex(tool_texts[4], r"^Knobs now: A = 100, B = 0, C = 90\.$")
         self.assertIn("Full at C=B", tool_texts[-1])           # read_notebook
         for name in ("transcript.jsonl", "measurements.csv", "notebook.md", "summary.json"):

@@ -52,7 +52,7 @@ attempt the run ends with status `error`, which `runs_summary.json` leaves out.
 | Tool | What it does |
 | --- | --- |
 | `set_knob` | Turn one knob: `knob` (A, B or C) and `value`. A is limited to 0..100; B and C take any angle in degrees. |
-| `read_voltage` | Read the voltage at the current settings: one reading (5 mV of noise), no averaging. To average, the model has to call it again. |
+| `read_voltage` | Read the voltage at the current settings: one reading (5 mV of noise), no averaging, and only the number (e.g. `0.9487 V`): keeping track of the knob settings is up to the model. To average, it has to call it again. |
 | `write_down` | Add an entry to the lab notebook. |
 | `read_notebook` | Read back every notebook entry. |
 | `plot` | Graph a list of (x, y) points it supplies itself, like making a plot in a spreadsheet, optionally with its own curve written in terms of x. Saves a PNG and answers with each point next to the curve's value. |

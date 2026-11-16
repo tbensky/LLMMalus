@@ -153,7 +153,8 @@ class ReadVoltage(Tool):
             return ToolResult(f"The reading failed: {exc}")
         state.readings += 1
         state.log_measurement(settings, value)
-        return ToolResult(f"At {_settings_text(settings)}: {value:.4f} {app.signal_units}",
+        # Just the reading: keeping track of the knob settings is the model's job.
+        return ToolResult(f"{value:.4f} {app.signal_units}",
                           data={"settings": settings, "value": value, "mean": value})
 
 
