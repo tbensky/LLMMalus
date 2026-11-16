@@ -51,7 +51,7 @@ attempt the run ends with status `error`, which `runs_summary.json` leaves out.
 
 | Tool | What it does |
 | --- | --- |
-| `set_knob` | Turn one knob: `knob` (A, B or C) and `value`. A is limited to 0..100; B and C take any angle in degrees. |
+| `set_knob` | Turn one knob: `knob` (A, B or C) and `value`. A is limited to 0..100; B and C take any angle in degrees. Replies only "Ok. Knob B has been set.", with no positions: the model keeps track of its settings itself. |
 | `read_voltage` | Read the voltage at the current settings: one reading (5 mV of noise), no averaging, and only the number (e.g. `0.9487 V`): keeping track of the knob settings is up to the model. To average, it has to call it again. |
 | `write_down` | Add an entry to the lab notebook. |
 | `read_notebook` | Read back every notebook entry. |

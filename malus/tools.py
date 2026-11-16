@@ -126,11 +126,12 @@ class SetKnob(Tool):
             state.apparatus.set_knob(knob, args["value"])
         except ApparatusError as exc:
             settings = state.apparatus.get_knobs()
-            return ToolResult(f"{exc} Knobs now: {_settings_text(settings)}.",
+            return ToolResult(str(exc),
                               data={"settings": settings, "problems": [str(exc)]})
         state.knob_moves += 1
         settings = state.apparatus.get_knobs()
-        return ToolResult(f"Knobs now: {_settings_text(settings)}.",
+        # No positions in the reply: keeping track of them is the model's job.
+        return ToolResult(f"Ok. Knob {knob} has been set.",
                           data={"settings": settings, "problems": []})
 
 

@@ -222,9 +222,9 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(summary["notebook_entries"], 1)
         # what the model was shown, in order
         tool_texts = [m["content"] for m in server.requests[-1]["messages"] if m["role"] == "tool"]
-        self.assertIn("Knobs now: A = 100, B = 0, C = 0.", tool_texts[0])
+        self.assertEqual(tool_texts[0], "Ok. Knob A has been set.")
         self.assertRegex(tool_texts[3], r"^\d\.\d{4} V$")        # the reading, nothing else
-        self.assertRegex(tool_texts[4], r"^Knobs now: A = 100, B = 0, C = 90\.$")
+        self.assertEqual(tool_texts[4], "Ok. Knob C has been set.")
         self.assertIn("Full at C=B", tool_texts[-1])           # read_notebook
         for name in ("transcript.jsonl", "measurements.csv", "notebook.md", "summary.json"):
             self.assertTrue((self.folder / name).exists(), name)
