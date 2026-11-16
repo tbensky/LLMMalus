@@ -103,8 +103,16 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Fraction leaking through crossed polarizers")
     bench.add_argument("--angle-offset", type=float, default=0.0,
                        help="Hidden offset between the B and C zero marks, degrees")
+    bench.add_argument("--bulb", choices=("logistic", "power"), default="logistic",
+                       help="logistic: brightness 1/(1+exp(-k(A-A_mid))), the bench bulb; "
+                            "power: (A/100)**exponent, linear at exponent 1 (the bulb of "
+                            "earlier runs)")
+    bench.add_argument("--bulb-midpoint", type=float, default=40.0,
+                       help="logistic bulb: setting of A at half brightness")
+    bench.add_argument("--bulb-steepness", type=float, default=0.17,
+                       help="logistic bulb: k, per unit of A")
     bench.add_argument("--bulb-exponent", type=float, default=1.0,
-                       help="Light ~ (A/100)**exponent; 1 = linear intensity controller")
+                       help="power bulb: light ~ (A/100)**exponent; 1 = linear")
     bench.add_argument("--saturation", type=float, default=None, help="Detector clips here, volts")
     bench.add_argument("--randomize-calibration", action="store_true",
                        help="Random full scale (2-9 V) and dark offset (0-0.05 V) per run; "
@@ -117,6 +125,8 @@ def make_apparatus(args: argparse.Namespace, seed: int):
         return HardwareApparatus(), {"apparatus": "hardware"}
     fixed = {"noise_volts": args.noise, "extinction": args.extinction,
              "angle_offset_deg": args.angle_offset,
+             "bulb": args.bulb, "bulb_midpoint": args.bulb_midpoint,
+             "bulb_steepness": args.bulb_steepness,
              "bulb_exponent": args.bulb_exponent, "saturation_volts": args.saturation}
     if args.randomize_calibration:
         config = SimulationConfig.randomized(random.Random(seed), **fixed)

@@ -3,7 +3,13 @@
 The bench is a bulb with an intensity controller, two rotatable polarizers and
 a photodetector, so the signal follows Malus's law:
 
-    V = V0 * (A/100) * cos^2(C - B)
+    V = V0 * L(A) * cos^2(C - B),    L(A) = 1 / (1 + exp(-0.17 * (A - 40)))
+
+L(A) is the bulb's brightness, modeled on the real bench's bulb: dark until
+A is about 20, half brightness at 40, saturated by about 65 (0.001 at A = 0,
+0.03 at 20, 0.97 at 60, 1.00 at 100). Runs before this bulb was added used a
+linear one, L(A) = A/100; `--bulb power` brings it back, and each run's
+`summary.json` records which bulb it had under `simulation`.
 
 The model is told none of that. It gets this task and nothing else:
 
@@ -186,8 +192,8 @@ runs, where judged leaves out `error` and `interrupted`, plus
 
 ## Making the bench harder
 
-The simulation defaults to a clean bench (5 V full scale, 5 mV noise, perfect
-polarizers). Options:
+The simulation defaults to a clean bench apart from the bulb (5 V full scale,
+5 mV noise, perfect polarizers, the logistic bulb above). Options:
 
 | Option | Effect |
 | --- | --- |
@@ -195,7 +201,8 @@ polarizers). Options:
 | `--dark 0.05` | detector offset with no light |
 | `--extinction 0.01` | light leaking through crossed polarizers |
 | `--angle-offset 37` | knob B's zero mark is 37 degrees off knob C's |
-| `--bulb-exponent 2.5` | the intensity controller is not linear |
+| `--bulb-midpoint 50 --bulb-steepness 0.1` | a different logistic bulb: half brightness at A = 50, a gentler rise |
+| `--bulb power` | brightness (A/100)**`--bulb-exponent`; exponent 1 (the default) is the linear bulb of earlier runs |
 | `--saturation 4.5` | the detector clips |
 | `--randomize-calibration` | random full scale (2 to 9 V) and dark offset (0 to 0.05 V) each run, so no constant can be memorized. The angle offset is not randomized: real polarizers have a hash mark on the transmission axis that students line up as the zero. Add `--angle-offset` for a misaligned bench |
 | `--keep-last 10` | only the last 10 exchanges stay in context; older findings survive only in the notebook |

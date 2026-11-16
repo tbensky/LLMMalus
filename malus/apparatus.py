@@ -95,6 +95,16 @@ KNOB_B = KnobSpec("B", "Rotates continuously; set it to any angle in degrees.", 
 KNOB_C = KnobSpec("C", "Rotates continuously; set it to any angle in degrees.", units="degrees")
 
 
+def bulb_brightness(a: float, config: "SimulationConfig") -> float:
+    """The bulb's brightness at knob setting a (0..100), as a fraction of full."""
+    if config.bulb == "logistic":
+        x = -config.bulb_steepness * (a - config.bulb_midpoint)
+        return 0.0 if x > 700 else 1.0 / (1.0 + math.exp(x))
+    if config.bulb == "power":
+        return (a / 100.0) ** config.bulb_exponent
+    raise ValueError(f"Unknown bulb {config.bulb!r}: use logistic or power")
+
+
 @dataclass
 class SimulationConfig:
     """How realistic the simulated bench is. Defaults are a clean bench.
@@ -107,8 +117,13 @@ class SimulationConfig:
                        polarizers are crossed (0 = perfect polarizers)
     angle_offset_deg   hidden angle between knob B's zero mark and knob C's
                        (real polarizer zero marks are never aligned)
-    bulb_exponent      detector light ~ (A/100)**bulb_exponent; 1 is a
-                       linear intensity controller, a real dimmed bulb is not
+    bulb               how brightness follows knob A:
+                         "logistic" (default)  1 / (1 + exp(-bulb_steepness * (A - bulb_midpoint)))
+                                               the bench bulb: dark until ~20, rising
+                                               through half brightness at 40, saturated
+                                               by ~65 (0.17 and 40 by default)
+                         "power"               (A/100)**bulb_exponent; exponent 1 is
+                                               the linear bulb runs used before
     saturation_volts   detector clips at this voltage (None: never)
     """
 
@@ -117,6 +132,9 @@ class SimulationConfig:
     noise_volts: float = 0.005
     extinction: float = 0.0
     angle_offset_deg: float = 0.0
+    bulb: str = "logistic"
+    bulb_midpoint: float = 40.0
+    bulb_steepness: float = 0.17
     bulb_exponent: float = 1.0
     saturation_volts: float | None = None
 
@@ -173,7 +191,7 @@ class SimulatedPolarizerApparatus(Apparatus):
         """The noiseless detector voltage (simulation only)."""
         s = settings or self._settings
         c = self.config
-        light = (s["A"] / 100.0) ** c.bulb_exponent
+        light = bulb_brightness(s["A"], c)
         delta = math.radians(s["C"] - s["B"] + c.angle_offset_deg)
         transmitted = c.extinction + (1.0 - c.extinction) * math.cos(delta) ** 2
         volts = c.dark_volts + c.full_scale_volts * light * transmitted

@@ -21,7 +21,9 @@ from malus.evaluate import FormulaError, compile_formula, score_formula  # noqa:
 from malus.lab import LabConfig, run_session, trim_history  # noqa: E402
 from malus.llm import make_client  # noqa: E402
 
-CORRECT = "V = 5*(A/100)*cos(radians(C - B))^2"
+# The default bench bulb: dark until ~20, half brightness at 40, saturated by ~65.
+BULB = "5/(1 + exp(-0.17*(A - 40)))"
+CORRECT = f"V = {BULB}*cos(radians(C - B))^2"
 
 
 def quiet_bench(**kw) -> SimulatedPolarizerApparatus:
@@ -35,7 +37,7 @@ class ApparatusTests(unittest.TestCase):
         return bench.read_signal()
 
     def test_malus_law(self):
-        bench = quiet_bench()
+        bench = quiet_bench(bulb="power")        # the linear bulb
         self.assertAlmostEqual(self.reading(bench, A=100, B=0, C=0), 5.0)
         self.assertAlmostEqual(self.reading(bench, A=100, B=0, C=90), 0.0)
         self.assertAlmostEqual(self.reading(bench, A=100, B=0, C=45), 2.5)
@@ -43,10 +45,21 @@ class ApparatusTests(unittest.TestCase):
         self.assertAlmostEqual(self.reading(bench, A=100, B=400, C=40), 5.0)  # B wraps
 
     def test_the_less_ideal_bench(self):
-        bench = quiet_bench(dark_volts=0.1, extinction=0.02, angle_offset_deg=30)
+        bench = quiet_bench(dark_volts=0.1, extinction=0.02, angle_offset_deg=30, bulb="power")
         self.assertAlmostEqual(self.reading(bench, A=0, B=0, C=0), 0.1)
         self.assertAlmostEqual(self.reading(bench, A=100, B=30, C=0), 5.1)   # aligned
         self.assertAlmostEqual(self.reading(bench, A=100, B=0, C=60), 0.1 + 5 * 0.02)
+
+    def test_the_bench_bulb_is_logistic(self):
+        bench = quiet_bench()
+        light = lambda a: self.reading(bench, A=a, B=0, C=0) / 5        # noqa: E731
+        self.assertAlmostEqual(light(40), 0.5)
+        self.assertLess(light(10), 0.01)          # dark at the bottom of the knob
+        self.assertGreater(light(70), 0.99)       # saturated near the top
+        self.assertAlmostEqual(light(40 + 10) - light(40 - 10), 2 * light(50) - 1)  # symmetric
+        self.assertAlmostEqual(self.reading(bench, A=40, B=0, C=60), 5 * 0.5 * 0.25)
+        bent = quiet_bench(bulb_midpoint=60, bulb_steepness=0.5)
+        self.assertAlmostEqual(self.reading(bent, A=60, B=0, C=0), 2.5)
 
     def test_knob_limits_and_bad_names(self):
         bench = quiet_bench()
@@ -68,15 +81,16 @@ class ApparatusTests(unittest.TestCase):
 class FormulaTests(unittest.TestCase):
     def test_a_correct_law_passes_and_wrong_forms_fail(self):
         self.assertTrue(score_formula(CORRECT, quiet_bench(), seed=3)["discovered"])
-        for wrong in ("5*(A/100)*cos(radians(C - B))",        # cos, not cos^2
-                      "5*(A/100)*cos(radians(C))**2",          # ignores B
-                      "5*(A/100)"):                             # no angle at all
+        for wrong in (f"{BULB}*cos(radians(C - B))",           # cos, not cos^2
+                      f"{BULB}*cos(radians(C))**2",             # ignores B
+                      BULB,                                     # no angle at all
+                      "5*(A/100)*cos(radians(C - B))**2"):      # a linear bulb
             self.assertFalse(score_formula(wrong, quiet_bench(), seed=3)["discovered"], wrong)
 
     def test_common_ways_of_writing_it(self):
         for text in (CORRECT, "5*A/100*math.cos(math.radians(C-B))**2",
                      "f(A,B,C) = 0.05*A*cos(pi*(C-B)/180)**2", "`5*A/100*cos(radians(C-B))**2`."):
-            self.assertAlmostEqual(compile_formula(text)(100, 0, 0), 5.0, msg=text)
+            self.assertAlmostEqual(compile_formula(text)(100, 0, 0), 5.0, places=3, msg=text)
 
     def test_unsafe_or_unknown_input_is_rejected(self):
         for bad in ("__import__('os').system('true')", "().__class__", "open('x')",
@@ -351,7 +365,7 @@ DISCOVER = [
     ("tools", turn(A=100, B=0, C=0) + [("read_voltage", {})]),
     ("tools", turn(C=90) + [("read_voltage", {})]),
 ]
-FIRST_GUESS = "0.05*A*cos(radians(C - B))**2"
+FIRST_GUESS = f"{BULB}*cos(radians(C - B))**2"
 
 
 class PlotAndFitTests(unittest.TestCase):
@@ -386,7 +400,7 @@ class PlotAndFitTests(unittest.TestCase):
                      ("tools", [("plot", {"points": data, "x_label": "C (deg)",
                                           "formula": "5*cos(radians(x))**2"})]),
                      ("tools", [("finish", {"conclusion": "fitted",
-                                            "formula": "0.05*A*cos(radians(C - B))**2"})])])
+                                            "formula": FIRST_GUESS})])])
         summary, shown = self.session(script)
         self.assertEqual((summary["status"], summary["fit_stage"]), ("finished", "done"))
         self.assertTrue(summary["initial_discovered"])
