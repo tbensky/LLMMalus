@@ -47,6 +47,9 @@ class LabState:
     measurements: list[dict[str, Any]] = field(default_factory=list)
     plots: list[dict[str, Any]] = field(default_factory=list)
     plot_checks: list[dict[str, Any]] = field(default_factory=list)  # audit of each plot
+    # What each plot was audited from, so finish can audit it again with the
+    # model's law: its points, its curve at each point, readings taken by then.
+    plot_inputs: list[dict[str, Any]] = field(default_factory=list)
     _csv_started: bool = False
 
     def log_measurement(self, settings: dict[str, float], value: float) -> None:
@@ -328,6 +331,9 @@ class Plot(Tool):
                   "too_good": check["too_good"], "rms_readings": check["rms_readings"]}
         state.plots.append(record)
         state.plot_checks.append(check)
+        state.plot_inputs.append({"points": points,
+                                  "curve": [c for _, _, c in rows] if law is not None else None,
+                                  "readings": len(state.measurements)})
         if state.folder is not None:
             with (state.folder / "plots" / "plots.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({**record, "data": rows, "check": check["points"]},

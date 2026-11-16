@@ -18,6 +18,12 @@ itself and the voltage divided by a bounded knob, A or A/100 (kimi plotted
 V/A). Every pairing is tried and the one that accounts for the most points,
 clean first and then rounded, is taken as what the model plotted.
 
+At finish the model's law is known, and it is one more candidate x: the law
+evaluated at each reading's settings. That recognizes a "measured against
+predicted" plot (kimi plotted each reading against what its law predicted,
+with the line y = x), which otherwise looks like real readings put at the
+wrong x.
+
 A plot with a curve gets one more check, for idealized data: points that lie on
 the curve much more closely than the readings they stand for (gemma plotted
 0.25 for a reading of 0.2521, 1 for 0.9969, and so on, all exactly on
@@ -184,20 +190,34 @@ def _classify(points, readings, xq: Quantity | None, yq: YQuantity) -> list[dict
     return rows
 
 
+def law_quantity(law: Callable[[dict[str, float]], float]) -> Quantity:
+    """The model's law as an x: what it predicts at a reading's settings."""
+    def predicted(settings: dict[str, float]) -> float | None:
+        try:
+            value = float(law(settings))
+        except (ArithmeticError, ValueError, TypeError):
+            return None
+        return value if math.isfinite(value) else None
+    return Quantity("law", predicted, derived=True)
+
+
 def audit_points(points: Iterable[tuple[float, float]],
                  readings: Sequence[dict[str, Any]],
                  knobs: Sequence[KnobSpec],
-                 curve: Sequence[float | None] | None = None) -> dict[str, Any]:
+                 curve: Sequence[float | None] | None = None,
+                 law: Callable[[dict[str, float]], float] | None = None) -> dict[str, Any]:
     """Classify each (x, y) against readings ({"settings": {...}, "mean": v}).
 
     curve, if given, is the model's curve at each point's x (same order), for
-    the idealized-data check.
+    the idealized-data check. law, if given, maps a reading's settings to the
+    model's predicted voltage, and is tried as one more x.
     """
     points = list(points)
     shown = [(dict(r["settings"]), round(float(r["mean"]), 4)) for r in readings]
+    xs = x_candidates(knobs) + ([law_quantity(law)] if law is not None else [])
     best_rows, best_score, x_name, y_name = None, (0, 0), None, None
     for yq in y_candidates(knobs):
-        for xq in x_candidates(knobs):
+        for xq in xs:
             rows = _classify(points, shown, xq, yq)
             score = (sum(r["status"] == "clean" for r in rows),
                      sum(r["status"] == "rounded" for r in rows))
@@ -263,7 +283,11 @@ def problem_lines(check: dict[str, Any], limit: int = 8) -> list[str]:
     bad = [r for r in rows if r["status"] in {"moved", "untraced"}]
     for r in bad[:limit]:
         where = f"x = {r['x']:g}, y = {r['y']:g}"
-        if r["status"] == "moved":
+        if r["status"] == "moved" and check.get("axis") == "law":
+            # x is the model's own prediction: say it is off, not what it should be
+            lines.append(f"{where}: that is your reading at {_settings_text(r['source'])}, "
+                         f"but your law does not give {r['x']:g} there.")
+        elif r["status"] == "moved":
             lines.append(f"{where}: that value comes from the reading you took at "
                          f"{_settings_text(r['source'])}, which is not this x.")
         else:

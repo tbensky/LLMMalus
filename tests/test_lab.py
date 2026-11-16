@@ -516,6 +516,18 @@ class PlotAndFitTests(unittest.TestCase):
         self.assertIn(f"At x = 0 you plotted 5, but your reading (A = 100, B = 0, C = 0) "
                       f"was {data[0][1]:.4f}.", refusal)
 
+    def test_a_measured_against_predicted_plot_passes_at_finish(self):
+        angles = [0, 30, 60, 90, 120, 150, 180]
+        data = real_points([], "C", angles, {"A": 100, "B": 0})
+        predicted = [[round(5 * math.cos(math.radians(c)) ** 2, 5), v] for c, v in data]
+        script = (sweep("C", angles, {"A": 100, "B": 0})
+                  + [("tools", [("plot", {"points": predicted, "formula": "x"})]),
+                     ("tools", [("finish", {"conclusion": "fitted", "formula": FIRST_GUESS})])])
+        summary, shown = self.session(script)
+        self.assertEqual((summary["status"], summary["data_check"]), ("finished", "clean"))
+        self.assertEqual(summary["final_plot"]["axis"], "law")
+        self.assertEqual(summary["plot_points_clean"], 7)          # summary counts updated
+
     def test_a_stubborn_model_is_let_go_after_three_refusals(self):
         finish = ("tools", [("finish", {"conclusion": "x", "formula": FIRST_GUESS})])
         script = (sweep("C", [0, 90], {"A": 100, "B": 0})
@@ -633,6 +645,30 @@ class DataCheckTests(unittest.TestCase):
         self.assertEqual((check["axis"], check["y_quantity"]), ("cos^2(B-C)", "V/A"))
         self.assertEqual(check["clean"], 5)
         self.assertFalse(check["too_good"])
+
+    def test_measured_against_predicted_is_recognized_with_the_law(self):
+        """kimi 002 plotted each reading against what its law predicted."""
+        from malus.audit import audit_points, needs_correction, problem_lines
+        law = lambda s: 0.05 * s["A"] * math.cos(math.radians(s["B"] - s["C"])) ** 2  # noqa
+        readings = [self.reading(100, 0, 30, 3.7457), self.reading(100, 30, -30, 1.2501),
+                    self.reading(25, 30, 0, 0.9363), self.reading(75, 30, 0, 2.8149),
+                    self.reading(100, 70, 0, 0.5763)]
+        plotted = [(3.75, 3.7457), (1.25, 1.2501), (0.9375, 0.9363), (2.8125, 2.8149),
+                   (0.58489, 0.5763)]
+        without = audit_points(plotted, readings, self.KNOBS, curve=[x for x, _ in plotted])
+        self.assertTrue(needs_correction(without))          # what kimi was refused for
+        check = audit_points(plotted, readings, self.KNOBS, curve=[x for x, _ in plotted],
+                             law=law)
+        self.assertEqual((check["axis"], check["clean"]), ("law", 5))
+        self.assertFalse(needs_correction(check))
+        # a prediction worked out wrong is still caught, without giving the answer
+        plotted[-1] = (0.589, 0.5763)
+        check = audit_points(plotted, readings, self.KNOBS, curve=[x for x, _ in plotted],
+                             law=law)
+        self.assertEqual(check["moved"], 1)
+        self.assertEqual(problem_lines(check), [
+            "x = 0.589, y = 0.5763: that is your reading at A = 100, B = 70, C = 0, but your "
+            "law does not give 0.589 there."])
 
     def test_digits_as_written(self):
         from malus.audit import half_unit, written_digits

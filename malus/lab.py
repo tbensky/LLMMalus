@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .apparatus import Apparatus
-from .audit import needs_correction, problem_lines
-from .evaluate import collect_holdout, score_formula
+from .audit import audit_points, needs_correction, problem_lines
+from .evaluate import FormulaError, collect_holdout, compile_formula, score_formula
 from .llm import ChatClient, LLMError, ToolCall, extract_text_tool_calls
 from .notebook import Notebook
 from .tools import LabState, ToolResult, Toolbox, default_tools
@@ -102,6 +102,31 @@ class LabConfig:
     data_check: bool = True
     data_check_message: str = DEFAULT_DATA_CHECK_MESSAGE
     max_data_refusals: int = 3
+
+
+def recheck_with_law(state: LabState, apparatus: Apparatus, plot: dict[str, Any],
+                     formula: str) -> dict[str, Any]:
+    """Audit a plot again with the model's law as a possible x.
+
+    A plot of each reading against what the law predicts for it (kimi's
+    "measured vs predicted") can only be recognized once the law is known.
+    The plot's record and check are updated, so the summary counts agree.
+    """
+    index = plot["number"] - 1
+    names = tuple(k.name for k in apparatus.knobs)
+    try:
+        compiled = compile_formula(formula, names)
+    except FormulaError:
+        return state.plot_checks[index]
+    inputs = state.plot_inputs[index]
+    check = audit_points(inputs["points"], state.measurements[:inputs["readings"]],
+                         apparatus.knobs, inputs["curve"],
+                         law=lambda s: compiled(*(s[n] for n in names)))
+    state.plot_checks[index] = check
+    plot.update({k: check[k] for k in ("axis", "y_quantity", "clean", "moved", "rounded",
+                                       "untraced", "too_good", "rms_readings")})
+    plot["law_checked"] = formula
+    return check
 
 
 def data_check_text(message: str, plot: dict[str, Any], check: dict[str, Any]) -> str:
@@ -260,7 +285,8 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
                 # Judge the plot it would end on: its last one with a curve.
                 fit_plot = next((p for p in reversed(state.plots) if p.get("formula")), None)
                 if fit_plot is not None:
-                    check = state.plot_checks[fit_plot["number"] - 1]
+                    check = recheck_with_law(state, apparatus, fit_plot,
+                                             result.data.get("formula", ""))
                     if not needs_correction(check):
                         data_state = "corrected" if data_refusals else "clean"
                     elif data_refusals < config.max_data_refusals:

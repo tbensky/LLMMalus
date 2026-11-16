@@ -55,7 +55,7 @@ attempt the run ends with status `error`, which `runs_summary.json` leaves out.
 | `read_voltage` | Read the voltage at the current settings: one reading (5 mV of noise), no averaging, and only the number (e.g. `0.9487 V`): keeping track of the knob settings is up to the model. To average, it has to call it again. |
 | `write_down` | Add an entry to the lab notebook. |
 | `read_notebook` | Read back every notebook entry. |
-| `plot` | Graph a list of (x, y) points it supplies itself, like making a plot in a spreadsheet, optionally with its own curve written in terms of x. Saves a PNG and answers with each point next to the curve's value. |
+| `plot` | Graph a list of (x, y) points it supplies itself, like making a plot in a spreadsheet, optionally with its own curve written in terms of x. Saves a PNG and answers only "Plot N saved."; it computes nothing for the model. |
 | `finish` | Announce it is done, with a written conclusion and the law as a Python expression in A, B and C. Its description also asks for systematic data and a hand fit with `plot` before finishing (`prompts/finish_tool.txt`). |
 
 The tool descriptions say "knob" and "voltage", never light or polarizers. To see
@@ -103,6 +103,12 @@ fitting) and record the constants. Its law at the first `finish` is recorded
   x comes close). A plot with a curve is also flagged as idealized when its
   points lie on the curve far more closely (4x or more, in RMS) than the
   readings they stand for, or exactly on it.
+  At `finish` the model's law is one more possible x: what the law predicts
+  at each reading's settings. That recognizes a "measured against predicted"
+  plot (kimi 002 plotted each reading against its law's prediction, with the
+  line y = x, and was wrongly refused three times before this was added). A
+  prediction worked out wrong is still refused, with "your law does not give
+  0.589 there" and no correct value.
 - **Finishing on bad data is refused.** At `finish`, the last plot with a curve
   is judged. If it has moved or untraced points, or is idealized, the finish is
   refused with `prompts/data_check.txt` followed by the specific points (e.g.
