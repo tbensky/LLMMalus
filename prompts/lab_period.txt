@@ -1,0 +1,1 @@
+The lab period is almost over: you have {left} turns left. Make your final plot, fit your law to it by hand, record your constants in your notebook, and call finish.

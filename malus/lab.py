@@ -57,6 +57,13 @@ DEFAULT_DATA_CHECK_MESSAGE = (
     "plot, taking new readings if you need to, fit your curve to the real data again, and "
     "then call finish."
 )
+# Sent once, when warn_calls_left model calls remain, like a teacher saying
+# the lab period is nearly over. {left} is filled in. Overridden by
+# prompts/lab_period.txt when the command line finds one.
+DEFAULT_LAB_PERIOD_WARNING = (
+    "The lab period is almost over: you have {left} turns left. Make your final plot, fit "
+    "your law to it by hand, record your constants in your notebook, and call finish."
+)
 FIT_REMINDER = ("Before finishing, make at least one plot of systematic data with your "
                 "hand-fitted curve, using plot, as described above.")
 TRIM_NOTE = ("(Earlier parts of this conversation have been removed to save "
@@ -65,7 +72,11 @@ TRIM_NOTE = ("(Earlier parts of this conversation have been removed to save "
 
 @dataclass
 class LabConfig:
-    max_calls: int = 150          # model calls before the session is stopped
+    max_calls: int = 400          # model calls before the session is stopped
+    # Warn the model once when this many calls are left (0: never). minimax
+    # ran out at 250 calls without finishing, with the right law in its notebook.
+    warn_calls_left: int = 40
+    lab_period_warning: str = DEFAULT_LAB_PERIOD_WARNING
     keep_last: int = 0            # keep only the last N exchanges in context (0 = all)
     max_idle: int = 5             # replies in a row with no tool call before stopping
     holdout_points: int = 40      # fresh readings used to check the final law
@@ -171,9 +182,17 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
     data_state = "not_checked" if config.data_check else "off"
     data_refusals = 0
     rejected_plots: list[int] = []
+    warned_at: int | None = None
 
     for call_number in range(1, config.max_calls + 1):
         state.call = call_number
+        left = config.max_calls - call_number + 1
+        if warned_at is None and 0 < config.warn_calls_left == left < config.max_calls:
+            warned_at = call_number
+            warning = config.lab_period_warning.replace("{left}", str(left))
+            messages.append({"role": "user", "content": warning})
+            transcript.write(call=call_number, role="user", content=warning)
+            say(f"[time] {warning}")
         calls_made = call_number
         try:
             reply = client.chat(trim_history(messages, config.keep_last), toolbox.schemas())
@@ -332,7 +351,9 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
         "rejected_plots": rejected_plots,
         "final_plot": _plot_brief(next((p for p in reversed(state.plots)
                                         if p.get("formula")), None)),
-        "readings_after_fit_request":(state.readings - readings_at_request
+        # The call at which the model was told the lab period is nearly over.
+        "lab_period_warning_call": warned_at,
+        "readings_after_fit_request": (state.readings - readings_at_request
                                        if fit_state in {"requested", "done", "skipped"} else None),
         "model_calls": calls_made,
         "tool_counts": dict(tool_counts),

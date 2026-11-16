@@ -30,7 +30,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from malus.apparatus import HardwareApparatus, SimulatedPolarizerApparatus, SimulationConfig  # noqa: E402
-from malus.lab import (DEFAULT_DATA_CHECK_MESSAGE, DEFAULT_FIT_REQUEST, LabConfig, next_run_dir, run_session,  # noqa: E402
+from malus.lab import (DEFAULT_DATA_CHECK_MESSAGE, DEFAULT_FIT_REQUEST,
+                       DEFAULT_LAB_PERIOD_WARNING, LabConfig, next_run_dir, run_session,  # noqa: E402
                        safe_model_name, write_runs_summary)
 from malus.llm import make_client  # noqa: E402
 from malus.tools import DEFAULT_FINISH_DESCRIPTION  # noqa: E402
@@ -61,8 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     lab = p.add_argument_group("session")
     lab.add_argument("--runs", type=int, default=1, help="Independent runs to do in a row")
-    lab.add_argument("--max-calls", type=int, default=250,
+    lab.add_argument("--max-calls", type=int, default=400,
                      help="Model calls per run (the fit stage needs room after the first finish)")
+    lab.add_argument("--warn-calls-left", type=int, default=40,
+                     help="Tell the model the lab period is nearly over when this many calls "
+                          "are left (0 = never)")
+    lab.add_argument("--lab-period-file", default=str(HERE / "prompts" / "lab_period.txt"),
+                     help="The warning; {left} is replaced by the calls left")
     lab.add_argument("--keep-last", type=int, default=0,
                      help="Keep only the last N exchanges in context (0 = all); "
                           "anything older survives only in the notebook")
@@ -142,7 +148,12 @@ def main(argv: list[str] | None = None) -> int:
     data_check_path = Path(args.data_check_file)
     data_check_message = (data_check_path.read_text(encoding="utf-8").strip()
                           if data_check_path.exists() else DEFAULT_DATA_CHECK_MESSAGE)
+    lab_period_path = Path(args.lab_period_file)
+    lab_period_warning = (lab_period_path.read_text(encoding="utf-8").strip()
+                          if lab_period_path.exists() else DEFAULT_LAB_PERIOD_WARNING)
     config = LabConfig(max_calls=args.max_calls, keep_last=args.keep_last,
+                       warn_calls_left=args.warn_calls_left,
+                       lab_period_warning=lab_period_warning,
                        holdout_points=args.holdout_points, threshold=args.threshold,
                        verbose=not args.quiet, fit_stage=not args.no_fit_stage,
                        fit_request=fit_request, finish_description=finish_description,
@@ -164,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         extra = {"model": args.model, "provider": args.provider, "run": f"{number:03d}",
                  "seed": seed, **bench_info,
                  "settings": {"max_calls": args.max_calls, "keep_last": args.keep_last,
+                              "warn_calls_left": args.warn_calls_left,
                               "threshold": args.threshold, "temperature": args.temperature,
                               "fit_stage": not args.no_fit_stage,
                               "data_check": not args.no_data_check},
@@ -172,7 +184,9 @@ def main(argv: list[str] | None = None) -> int:
                  "prompts": {"system": system_prompt, "task": task_prompt,
                              "fit_request": None if args.no_fit_stage else fit_request,
                              "finish_tool": finish_description,
-                             "data_check": None if args.no_data_check else data_check_message}}
+                             "data_check": None if args.no_data_check else data_check_message,
+                             "lab_period": (lab_period_warning if args.warn_calls_left > 0
+                                            else None)}}
         try:
             summary = run_session(client, apparatus, system_prompt=system_prompt,
                                   task_prompt=task_prompt, folder=run_dir, config=config,

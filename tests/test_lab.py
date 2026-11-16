@@ -263,6 +263,22 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(summary["status"], "finished")
         self.assertIn("error", summary["evaluation"])
 
+    def test_the_model_is_warned_once_when_the_lab_period_is_nearly_over(self):
+        summary, server = self.session("openai", [("tools", [("read_voltage", {})])] * 10,
+                                       max_calls=6, warn_calls_left=2)
+        self.assertEqual((summary["status"], summary["lab_period_warning_call"]),
+                         ("call_limit", 5))
+        last = lambda r: r["messages"][-1]["content"]          # noqa: E731
+        self.assertEqual(last(server.requests[4]), "The lab period is almost over: you have "
+                         "2 turns left. Make your final plot, fit your law to it by hand, "
+                         "record your constants in your notebook, and call finish.")
+        warnings = [m for m in server.requests[-1]["messages"]
+                    if m["role"] == "user" and "lab period" in (m["content"] or "")]
+        self.assertEqual(len(warnings), 1)
+        summary, _ = self.session("openai", [("tools", [("read_voltage", {})])] * 10,
+                                  max_calls=6, warn_calls_left=0)
+        self.assertIsNone(summary["lab_period_warning_call"])
+
     def test_the_call_limit_stops_a_session(self):
         summary, _ = self.session("openai", [("tools", [("read_voltage", {})])] * 10,
                                   max_calls=4)

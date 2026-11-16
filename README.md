@@ -146,8 +146,17 @@ settings. The score is the RMS error divided by the range of the readings; 5% or
 less counts as found (`--threshold`). A correct law with fitted constants passes
 easily; cos instead of cos^2, or a law that ignores a knob, fails.
 
+**The lab period.** A run gets 400 model calls (`--max-calls`). When 40 are
+left (`--warn-calls-left`, 0 for never) the model is told once, like a class
+near the end of a lab: "The lab period is almost over: you have 40 turns left.
+Make your final plot, fit your law to it by hand, record your constants in your
+notebook, and call finish." (`prompts/lab_period.txt`; `{left}` is filled in).
+`lab_period_warning_call` in the summary says when it was told. minimax ran out
+of calls at the old limit of 250 without ever finishing, with the right law in
+its notebook since call 34.
+
 Run statuses: `finished` (its final finish was accepted), `call_limit` (hit
-`--max-calls`, default 250), `no_tool_calls` (five replies in a row without using
+`--max-calls`, default 400), `no_tool_calls` (five replies in a row without using
 a tool), `error` (the endpoint kept failing) and `interrupted` (Ctrl-C).
 `fit_stage` in each summary is `unprompted` (fitted before its first finish),
 `done` (fitted after being asked), `skipped`, `requested` (asked for the fit but
@@ -217,7 +226,7 @@ malus/lab.py          the conversation loop and run folders
 malus/evaluate.py     safe formula parsing and the final check
 malus/audit.py        the data check on plotted points
 prompts/              system prompt, task, finish's description, the fit request,
-                      the data-check refusal
+                      the data-check refusal, the lab-period warning
 tests/test_lab.py     offline tests against fake OpenAI and Ollama servers
 ```
 
