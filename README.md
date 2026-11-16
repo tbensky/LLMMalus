@@ -178,7 +178,7 @@ polarizers). Options:
 | `--angle-offset 37` | knob B's zero mark is 37 degrees off knob C's |
 | `--bulb-exponent 2.5` | the intensity controller is not linear |
 | `--saturation 4.5` | the detector clips |
-| `--randomize-calibration` | random full scale, dark offset and angle offset each run, so no constant can be memorized |
+| `--randomize-calibration` | random full scale (2 to 9 V) and dark offset (0 to 0.05 V) each run, so no constant can be memorized. The angle offset is not randomized: real polarizers have a hash mark on the transmission axis that students line up as the zero. Add `--angle-offset` for a misaligned bench |
 | `--keep-last 10` | only the last 10 exchanges stay in context; older findings survive only in the notebook |
 
 Run NNN uses `--seed` + NNN − 1 for its noise and calibration, so runs repeat exactly.

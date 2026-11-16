@@ -125,12 +125,14 @@ class SimulationConfig:
         """A bench with unknown calibration, so no constant can be memorized.
 
         The law stays the same; only the constants a student would have to
-        measure change from run to run.
+        measure change from run to run: the full-scale voltage and the dark
+        offset. The angle offset is left alone (0 unless given): real
+        polarizers carry a hash mark on the transmission axis, and a student
+        lines those up as the zero, so the dials agree on "aligned".
         """
         config = cls(
             full_scale_volts=round(rng.uniform(2.0, 9.0), 3),
             dark_volts=round(rng.uniform(0.0, 0.05), 4),
-            angle_offset_deg=round(rng.uniform(0.0, 180.0), 1),
         )
         for key, value in fixed.items():
             setattr(config, key, value)

@@ -687,6 +687,7 @@ class CommandLineTests(unittest.TestCase):
             self.assertIn("3 knobs", run1["prompts"]["task"])     # the wording it saw
             self.assertIsNone(run1["prompts"]["fit_request"])
             self.assertNotEqual(run1["simulation"]["full_scale_volts"], 5.0)
+            self.assertEqual(run1["simulation"]["angle_offset_deg"], 0.0)  # hash marks lined up
 
 
 if __name__ == "__main__":

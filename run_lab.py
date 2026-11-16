@@ -101,7 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Light ~ (A/100)**exponent; 1 = linear intensity controller")
     bench.add_argument("--saturation", type=float, default=None, help="Detector clips here, volts")
     bench.add_argument("--randomize-calibration", action="store_true",
-                       help="Random full scale, dark offset and angle offset per run")
+                       help="Random full scale (2-9 V) and dark offset (0-0.05 V) per run; "
+                            "the angle offset stays at --angle-offset")
     return p
 
 
@@ -109,12 +110,13 @@ def make_apparatus(args: argparse.Namespace, seed: int):
     if args.apparatus == "hardware":
         return HardwareApparatus(), {"apparatus": "hardware"}
     fixed = {"noise_volts": args.noise, "extinction": args.extinction,
+             "angle_offset_deg": args.angle_offset,
              "bulb_exponent": args.bulb_exponent, "saturation_volts": args.saturation}
     if args.randomize_calibration:
         config = SimulationConfig.randomized(random.Random(seed), **fixed)
     else:
         config = SimulationConfig(full_scale_volts=args.full_scale, dark_volts=args.dark,
-                                  angle_offset_deg=args.angle_offset, **fixed)
+                                  **fixed)
     return (SimulatedPolarizerApparatus(config, seed=seed),
             {"apparatus": "simulated", "simulation": asdict(config)})
 
