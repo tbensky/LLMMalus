@@ -48,6 +48,12 @@ writes as text instead are accepted too and counted in `text_tool_calls`: a call
 written out as JSON, just a tool's arguments (gpt-oss handed in `finish`'s
 `{"conclusion": ..., "formula": ...}` this way), or gpt-oss's own
 `to=functions.read_voltage` syntax leaking through the host.
+DeepSeek's own call markup can leak too, folding a second call into the
+first one's arguments: run 005 sent `write_down` with
+`{"text": "...<｜DSML｜ invoke name=\"set_knob\">", "knob": "B", "value": 0}`,
+so the notebook got the markup and the knob never moved. Such a call is split
+back into the two calls the model made (the note, cut where the markup
+starts, and the knob move) and counted in `leaked_tool_calls`.
 
 When the host errors (HTTP 429 or 5xx, or a timeout) a model call is retried up to
 8 times, waiting 2, 4, 8, 16 and then 30 seconds (`--retries`). After the last
