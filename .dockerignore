@@ -1,0 +1,10 @@
+.git
+Runs
+Probe
+__pycache__
+*.pyc
+.DS_Store
+.env
+.env.*
+.malusctl-job
+initial_build.txt

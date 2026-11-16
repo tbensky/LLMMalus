@@ -173,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
             run_dir.rmdir()
             return 2
         extra = {"model": args.model, "provider": args.provider, "run": f"{number:03d}",
+                 # the git commit of a container image (k8s/Dockerfile); None locally
+                 "code_version": os.environ.get("MALUS_VERSION"),
                  "seed": seed, **bench_info,
                  "settings": {"max_calls": args.max_calls, "keep_last": args.keep_last,
                               "warn_calls_left": args.warn_calls_left,

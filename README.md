@@ -202,6 +202,20 @@ polarizers). Options:
 
 Run NNN uses `--seed` + NNN − 1 for its noise and calibration, so runs repeat exactly.
 
+## Running on the cluster
+
+Open-weight models can run on CSU TIDE through Ollama on a GPU, with models
+cached on a claim so each is downloaded once:
+
+```bash
+./malusctl build && ./malusctl volumes      # once
+./malusctl start qwen3:8b 10                # a batch of 10 runs
+./malusctl status
+./malusctl fetch qwen3:8b                   # -> Runs/k8s/qwen3_8b/
+```
+
+See `k8s/README.md`.
+
 ## Connecting the real bench
 
 Everything that knows about the physics is in `malus/apparatus.py`. The tools,
@@ -238,6 +252,7 @@ malus/audit.py        the data check on plotted points
 prompts/              system prompt, task, finish's description, the fit request,
                       the data-check refusal, the lab-period warning
 tests/test_lab.py     offline tests against fake OpenAI and Ollama servers
+malusctl, k8s/        running batches on CSU TIDE (k8s/README.md)
 ```
 
 Run the tests with `python3 -m unittest tests.test_lab`.

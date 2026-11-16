@@ -1,0 +1,46 @@
+# A do-nothing pod that mounts the results claim, so runs can be copied off it
+# after the Job's pod is gone (kubectl cp needs a running pod). ./malusctl
+# fetch creates and deletes it for you.
+#
+# A public python image, so no pull secret, and no GPU, so it schedules at
+# once. The sleep is a backstop for a forgotten pod; delete it when done:
+#
+#   kubectl delete -n cal-poly-physai pod/malus-pvc-shell
+apiVersion: v1
+kind: Pod
+metadata:
+  name: malus-pvc-shell
+  labels:
+    app: malus-pvc-shell
+spec:
+  restartPolicy: Never
+  containers:
+    - name: shell
+      image: python:3.12-slim
+      command: ["sh", "-c", "sleep 7200"]
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "250m"
+          memory: "512Mi"
+      volumeMounts:
+        - name: results
+          mountPath: /workspace
+  volumes:
+    - name: results
+      persistentVolumeClaim:
+        claimName: malus-results
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: nautilus.io/csu-tide
+                operator: Exists
+  tolerations:
+    - key: nautilus.io/reservation
+      operator: Equal
+      value: csu-tide
+      effect: NoSchedule

@@ -1,0 +1,34 @@
+# Created once; they outlive every Job.
+#
+#   malus-models    Ollama's model cache (/root/.ollama). Pulled once, reused
+#                   by every later Job, so a model is not downloaded again.
+#   malus-results   Runs/<model>/NNN, exactly as a local run lays them out.
+#
+#   kubectl apply -n cal-poly-physai -f k8s/volumes.yaml      (or ./malusctl volumes)
+#
+# Deleting a claim deletes its contents. Check the cache with
+# ./malusctl models before pulling: a 27-32B model at Q4 is ~16-20 GB and
+# a pull can fail partway on a full volume.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: malus-models
+spec:
+  storageClassName: rook-cephfs-tide
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: malus-results
+spec:
+  storageClassName: rook-cephfs-tide
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi

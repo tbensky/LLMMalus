@@ -1,0 +1,187 @@
+# One batch of runs of one Ollama model on a GPU.
+#
+# Start it with ./malusctl start <model> [runs] [-- run_lab.py options]. The
+# quoted __PLACEHOLDER__ values below are filled in by malusctl, so
+# `kubectl create -f` on this file directly will not work.
+#
+# Three containers share the pod:
+#   ollama-pull  (init) pulls the model into the malus-models cache, so only
+#                the first Job for a model downloads it
+#   lab          runs run_lab.py --runs N against Ollama on localhost and
+#                writes Runs/<model>/NNN to the malus-results claim
+#   ollama       serves the model on the GPU; it exits when the lab container
+#                finishes so the Job can complete
+#
+# The stop signal is a file on a pod-local emptyDir, not on the results
+# claim. GAPhysicsSolver used /workspace/solver.done on its shared claim, so a
+# second Job starting on the same claim would delete the first one's marker
+# at init time.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: malus-lab-
+  labels:
+    app: malus-lab
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: malus-lab
+    spec:
+      imagePullSecrets:
+        - name: ghcr-creds
+      restartPolicy: Never
+      initContainers:
+        - name: ollama-pull
+          image: ollama/ollama:latest
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              ollama serve >/tmp/ollama-init.log 2>&1 &
+              for i in $(seq 1 60); do
+                ollama list >/dev/null 2>&1 && break
+                sleep 1
+              done
+              ollama pull "$MALUS_MODEL"
+              ollama list
+          env:
+            - name: MALUS_MODEL
+              value: "__MODEL__"
+          resources:
+            # limits == requests: the namespace caps limit/request at 1.2
+            requests:
+              cpu: "1"
+              memory: "4Gi"
+              ephemeral-storage: "2Gi"
+            limits:
+              cpu: "1"
+              memory: "4Gi"
+              ephemeral-storage: "2Gi"
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+      containers:
+        - name: lab
+          image: "__IMAGE__"
+          imagePullPolicy: Always
+          command: ["sh", "k8s/entrypoint.sh"]
+          env:
+            - name: MALUS_MODEL
+              value: "__MODEL__"
+            - name: MALUS_RUNS
+              value: "__RUNS__"
+            # Ollama's context window per request. run_lab.py's own default is
+            # 16384, which a long run outgrows; past it Ollama silently drops
+            # the oldest messages, the task included. 32768 holds a 400-call
+            # run of a terse model; a verbose one needs --keep-last instead.
+            - name: MALUS_NUM_CTX
+              value: "__NUM_CTX__"
+            # Seconds per model call: a local model on one GPU is slower than
+            # a hosted one, and a thinking model slower still.
+            - name: MALUS_TIMEOUT
+              value: "__TIMEOUT__"
+            # Anything else for run_lab.py, e.g. "--keep-last 10 --think off"
+            - name: MALUS_ARGS
+              value: "__ARGS__"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            # It only waits on HTTP to the ollama container.
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+              ephemeral-storage: "2Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+              ephemeral-storage: "2Gi"
+          volumeMounts:
+            - name: results
+              mountPath: /workspace
+            - name: signal
+              mountPath: /signal
+        - name: ollama
+          image: ollama/ollama:latest
+          env:
+            # Runs are strictly one after another, so one request at a time.
+            - name: OLLAMA_NUM_PARALLEL
+              value: "1"
+            - name: OLLAMA_MAX_LOADED_MODELS
+              value: "1"
+            # Keep the model on the GPU between runs and between calls.
+            - name: OLLAMA_KEEP_ALIVE
+              value: "-1"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              ollama serve &
+              ollama_pid=$!
+              stop_ollama() {
+                kill "$ollama_pid" 2>/dev/null || true
+                wait "$ollama_pid" || true
+              }
+              trap stop_ollama EXIT INT TERM
+              while kill -0 "$ollama_pid" 2>/dev/null; do
+                if [ -f /signal/lab.done ]; then
+                  echo "Lab finished; stopping Ollama."
+                  exit 0
+                fi
+                sleep 2
+              done
+              wait "$ollama_pid"
+          resources:
+            # 24Gi of host memory, as in GAPhysicsSolver. A model bigger than
+            # ~20 GB may need more; raise it only once the pod's
+            # lastState.terminated.reason says OOMKilled.
+            requests:
+              cpu: "2"
+              memory: "24Gi"
+              ephemeral-storage: "5Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "2"
+              memory: "24Gi"
+              ephemeral-storage: "5Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+            - name: signal
+              mountPath: /signal
+      volumes:
+        - name: results
+          persistentVolumeClaim:
+            claimName: malus-results
+        - name: models
+          persistentVolumeClaim:
+            claimName: malus-models
+        - name: signal
+          emptyDir: {}
+      # The GPU product is pinned so two batches of one model run on the same
+      # kind of card (malusctl fills it in: NVIDIA-L40 by default, 46 GB, 17
+      # nodes; MALUS_GPU=NVIDIA-A100-80GB-PCIe for a model that needs more).
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nautilus.io/csu-tide
+                    operator: Exists
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    values:
+                      - "__GPU__"
+      tolerations:
+        - key: nautilus.io/reservation
+          operator: Equal
+          value: csu-tide
+          effect: NoSchedule

@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+# Run the Malus lab against Ollama models on CSU TIDE (namespace cal-poly-physai).
+# Modeled on GAPhysicsSolver's physai. See k8s/README.md.
+set -euo pipefail
+
+NAMESPACE="${MALUS_NAMESPACE:-cal-poly-physai}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE="${MALUS_IMAGE:-ghcr.io/tbensky/llmmalus:latest}"
+GPU="${MALUS_GPU:-NVIDIA-L40}"
+NUM_CTX="${MALUS_NUM_CTX:-32768}"
+TIMEOUT="${MALUS_TIMEOUT:-600}"
+LOG_TAIL="${MALUS_LOG_TAIL:-2000}"
+JOB_FILE="${REPO_ROOT}/.malusctl-job"
+LAB_LABEL='app=malus-lab'
+SHELL_POD=malus-pvc-shell
+RESULTS_ROOT=/workspace/Runs
+
+usage() {
+  cat <<'USAGE'
+Usage: ./malusctl COMMAND
+
+  build                  build the lab image and push it (docker buildx, linux/amd64)
+  volumes                create the model-cache and results claims (once)
+  models                 list the models in the cache, and disk left (no GPU)
+  pull MODEL...          download models into the cache ahead of time (no GPU)
+  rm-model MODEL...      remove models from the cache (refuses while a batch runs)
+  start MODEL [RUNS] [-- RUN_LAB_OPTIONS]
+                         start a batch of RUNS runs (default 1) of an Ollama model
+  pull-status            follow the current batch's model download
+  status                 how the current batch is doing, read off the claim
+  log                    follow the lab's output (last MALUS_LOG_TAIL lines, then -f)
+  list                   jobs, pods and claims
+  stop | delete          delete the current batch's Job
+  fetch [MODEL]          copy runs off the results claim into Runs/k8s/<model>/
+
+Examples:
+  ./malusctl build
+  ./malusctl volumes
+  ./malusctl pull qwen3:8b gemma3:27b
+  ./malusctl start qwen3:8b 10
+  ./malusctl start gemma3:27b 5 -- --keep-last 10
+  ./malusctl status
+  ./malusctl fetch qwen3:8b
+
+Settings (environment): MALUS_IMAGE, MALUS_GPU (NVIDIA-L40 or
+NVIDIA-A100-80GB-PCIe), MALUS_NUM_CTX (32768), MALUS_TIMEOUT (600 s per
+call), MALUS_NAMESPACE, MALUS_LOG_TAIL.
+USAGE
+}
+
+# Fill the "__NAME__" placeholders of a manifest. Values are written as JSON
+# strings, which YAML reads as double-quoted scalars, so tags like
+# hf.co/user/model:Q4_K_M and option strings with spaces need no escaping.
+render() {  # render MANIFEST KEY=VALUE...
+  python3 - "$@" <<'PY'
+import json, re, sys
+path, *pairs = sys.argv[1:]
+text = open(path, encoding="utf-8").read()
+for pair in pairs:
+    key, value = pair.split("=", 1)
+    token = f'"__{key}__"'
+    if token not in text:
+        sys.exit(f"render: {token} is not in {path}")
+    text = text.replace(token, json.dumps(value))
+left = sorted(set(re.findall(r'"__[A-Z_]+__"', text)))
+if left:
+    sys.exit(f"render: {path} still has {', '.join(left)}")
+sys.stdout.write(text)
+PY
+}
+
+safe_name() {  # the folder name run_lab.py uses for a model
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from malus.lab import safe_model_name; print(safe_model_name(sys.argv[2]))' \
+    "$REPO_ROOT" "$1"
+}
+
+current_job() {
+  if [[ -s "$JOB_FILE" ]]; then
+    local recorded
+    recorded="$(<"$JOB_FILE")"
+    if [[ -n "$recorded" ]] && kubectl get job -n "$NAMESPACE" "$recorded" >/dev/null 2>&1; then
+      printf '%s\n' "$recorded"
+      return
+    fi
+  fi
+  kubectl get jobs -n "$NAMESPACE" -l "$LAB_LABEL" \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | tail -n 1
+}
+
+# Follow a container's log, retrying while the pod is still starting (right
+# after `kubectl create` it is Pending or PodInitializing, and kubectl logs
+# refuses -- exactly when you most want to watch it).
+follow() {  # follow JOB CONTAINER
+  local job="$1" container="$2" err
+  err="$(mktemp)"
+  for attempt in $(seq 1 30); do
+    if kubectl logs -n "$NAMESPACE" "job/$job" -c "$container" -f 2>"$err"; then
+      rm -f "$err"
+      return 0
+    fi
+    if grep -q 'waiting to start\|PodInitializing\|ContainerCreating\|not found\|Pending' "$err"; then
+      echo "    $container not started yet (attempt $attempt/30); retrying in 10 s..." >&2
+      sleep 10
+      continue
+    fi
+    cat "$err" >&2
+    rm -f "$err"
+    return 1
+  done
+  rm -f "$err"
+  echo "Gave up waiting for $container. Is the pod Pending? kubectl describe pod -n $NAMESPACE -l job-name=$job" >&2
+  return 1
+}
+
+models_job() {  # models_job ACTION MODEL...
+  local action="$1"; shift
+  local job
+  job="$(render "$REPO_ROOT/k8s/models-job.yaml" ACTION="$action" MODELS="$*" \
+         | kubectl create -n "$NAMESPACE" -f - -o jsonpath='{.metadata.name}')"
+  echo "==> $job ($action${*:+ $*})" >&2
+  follow "$job" models
+}
+
+lab_alive() {
+  kubectl get pods -n "$NAMESPACE" -l "$LAB_LABEL" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}' 2>/dev/null \
+    | awk '$2=="Running" || $2=="Pending"' || true
+}
+
+case "${1:-}" in
+  build)
+    version="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+    if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
+      version="${version}-dirty"
+      echo "Note: uncommitted changes; the image is tagged as version $version." >&2
+    fi
+    docker buildx build --platform linux/amd64 --build-arg BUILD_VERSION="$version" \
+      -t "$IMAGE" -f "$REPO_ROOT/k8s/Dockerfile" --push "$REPO_ROOT"
+    echo "pushed $IMAGE (version $version)"
+    ;;
+  volumes)
+    kubectl apply -n "$NAMESPACE" -f "$REPO_ROOT/k8s/volumes.yaml"
+    kubectl wait -n "$NAMESPACE" --for=jsonpath='{.status.phase}'=Bound \
+      pvc/malus-models pvc/malus-results --timeout=180s
+    ;;
+  models)
+    models_job list
+    ;;
+  pull)
+    shift
+    [[ $# -gt 0 ]] || { echo "Usage: ./malusctl pull MODEL..." >&2; exit 2; }
+    models_job pull "$@"
+    ;;
+  rm-model)
+    shift
+    [[ $# -gt 0 ]] || { echo "Usage: ./malusctl rm-model MODEL..." >&2; exit 2; }
+    live="$(lab_alive)"
+    if [[ -n "$live" ]]; then
+      echo "Refusing: a batch is running and its Ollama server may have these weights open:" >&2
+      printf '    %s\n' "$live" >&2
+      exit 1
+    fi
+    models_job rm "$@"
+    ;;
+  start)
+    shift
+    model="${1:-}"
+    [[ -n "$model" && "$model" != "--" ]] || { echo "Usage: ./malusctl start MODEL [RUNS] [-- OPTIONS]" >&2; exit 2; }
+    shift
+    runs=1
+    if [[ $# -gt 0 && "$1" != "--" ]]; then runs="$1"; shift; fi
+    [[ "$runs" =~ ^[1-9][0-9]*$ ]] || { echo "RUNS must be a positive number, not '$runs'." >&2; exit 2; }
+    if [[ $# -gt 0 && "$1" == "--" ]]; then shift; fi
+    args="$*"
+    job="$(render "$REPO_ROOT/k8s/job-gpu.yaml" MODEL="$model" RUNS="$runs" NUM_CTX="$NUM_CTX" \
+             TIMEOUT="$TIMEOUT" ARGS="$args" IMAGE="$IMAGE" GPU="$GPU" \
+           | kubectl create -n "$NAMESPACE" -f - -o jsonpath='{.metadata.name}')"
+    printf '%s\n' "$job" > "$JOB_FILE"
+    echo "$job: $model, $runs run(s), num_ctx $NUM_CTX, ${TIMEOUT}s per call, $GPU${args:+, $args}"
+    echo "  ./malusctl pull-status   # the model download (first Job for a model)"
+    echo "  ./malusctl log           # the lab's output"
+    echo "  ./malusctl status        # results so far"
+    ;;
+  pull-status)
+    job="${2:-$(current_job)}"
+    [[ -n "$job" ]] || { echo "No batch found." >&2; exit 1; }
+    echo "==> model download for $job" >&2
+    follow "$job" ollama-pull
+    ;;
+  log)
+    job="$(current_job)"
+    [[ -n "$job" ]] || { echo "No batch found." >&2; exit 1; }
+    kubectl logs -n "$NAMESPACE" "job/$job" -c lab --tail="$LOG_TAIL" -f
+    ;;
+  status)
+    # One shot, read off the claim from inside the lab container, so it does
+    # not care whether the laptop slept since the batch started.
+    job="$(current_job)"
+    [[ -n "$job" ]] || { echo "No batch found." >&2; exit 1; }
+    echo "job: $job"
+    kubectl exec -i -n "$NAMESPACE" "job/$job" -c lab -- python3 - <<'PY'
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, "/usr/src/app")
+from malus.lab import numbered_run_dirs, safe_model_name
+
+model = os.environ["MALUS_MODEL"]
+folder = Path("/workspace/Runs") / safe_model_name(model)
+print(f"model: {model}   runs asked for: {os.environ.get('MALUS_RUNS')}   folder: {folder}")
+for run in numbered_run_dirs(folder):
+    summary = run / "summary.json"
+    if summary.exists():
+        s = json.loads(summary.read_text())
+        nrmse = s.get("nrmse")
+        print(f"  {run.name}  {s.get('status'):<14} found={str(s.get('discovered')):<5} "
+              f"nrmse={nrmse if nrmse is None else round(nrmse, 4)!s:<7} "
+              f"calls={s.get('model_calls')} fit={s.get('fit_stage')} data={s.get('data_check')}")
+        continue
+    calls, last = 0, ""
+    transcript = run / "transcript.jsonl"
+    if transcript.exists():
+        for line in transcript.open(encoding="utf-8"):
+            record = json.loads(line)
+            calls = max(calls, record.get("call") or 0)
+            if record.get("role") == "tool":
+                last = f"{record.get('name')} -> {str(record.get('content'))[:60]!r}"
+    print(f"  {run.name}  RUNNING        call {calls}; last: {last}")
+totals = folder / "runs_summary.json"
+if totals.exists():
+    t = json.loads(totals.read_text())
+    print(f"found the law: {t['discovered']} of {t['judged']} judged runs "
+          f"({t['runs']} on the claim)")
+PY
+    ;;
+  list)
+    kubectl get jobs,pods -n "$NAMESPACE" -l "$LAB_LABEL" -o wide
+    kubectl get jobs -n "$NAMESPACE" -l app=malus-models
+    kubectl get pvc -n "$NAMESPACE" malus-models malus-results
+    ;;
+  delete|stop)
+    job="$(current_job)"
+    if [[ -n "$job" ]]; then
+      kubectl delete job -n "$NAMESPACE" "$job"
+    else
+      echo "No batch found."
+    fi
+    rm -f "$JOB_FILE"
+    ;;
+  fetch)
+    # Copy runs off the results claim into Runs/k8s/<model>/ (kept apart from
+    # local runs, which number from 001 too). One verified tar per run, and a
+    # run already fetched with its summary.json is skipped, so this can be
+    # re-run until everything is there -- GAPhysicsSolver lost files to a
+    # single long `kubectl cp` and to tar streams cut off mid-archive.
+    want="${2:-}"
+    kubectl delete -n "$NAMESPACE" "pod/$SHELL_POD" --ignore-not-found --wait >/dev/null
+    kubectl apply -n "$NAMESPACE" -f "$REPO_ROOT/k8s/pvc-shell.yaml" >/dev/null
+    trap 'kubectl delete -n "$NAMESPACE" "pod/'"$SHELL_POD"'" --ignore-not-found >/dev/null 2>&1 || true' EXIT
+    kubectl wait -n "$NAMESPACE" --for=condition=Ready "pod/$SHELL_POD" --timeout=300s >/dev/null || {
+      echo "The shell pod never became Ready:" >&2
+      kubectl describe pod -n "$NAMESPACE" "$SHELL_POD" 2>&1 | tail -20 >&2
+      exit 1
+    }
+    if [[ -n "$want" ]]; then
+      model_dirs="$(safe_name "$want")"
+    else
+      model_dirs="$(kubectl exec -n "$NAMESPACE" "$SHELL_POD" -- sh -c "ls -1 $RESULTS_ROOT 2>/dev/null" | tr -d '\r')"
+    fi
+    [[ -n "$model_dirs" ]] || { echo "Nothing on the results claim yet."; exit 0; }
+    fail=0
+    tmp="$(mktemp -d)"
+    for m in $model_dirs; do
+      dest="$REPO_ROOT/Runs/k8s/$m"
+      mkdir -p "$dest"
+      runs="$(kubectl exec -n "$NAMESPACE" "$SHELL_POD" -- sh -c "ls -1 $RESULTS_ROOT/$m 2>/dev/null" \
+              | tr -d '\r' | grep -E '^[0-9]{3,}$' || true)"
+      got=0; kept=0
+      for r in $runs; do
+        if [[ -s "$dest/$r/summary.json" ]]; then kept=$((kept+1)); continue; fi
+        if kubectl exec -n "$NAMESPACE" "$SHELL_POD" -- tar czf - -C "$RESULTS_ROOT/$m" "$r" \
+             > "$tmp/run.tgz" 2>/dev/null && gunzip -t "$tmp/run.tgz" 2>/dev/null; then
+          rm -rf "${dest:?}/$r"
+          tar xzf "$tmp/run.tgz" -C "$dest" && got=$((got+1))
+        else
+          echo "FAIL $m/$r"; fail=$((fail+1))
+        fi
+      done
+      for f in runs_summary.json jobs.log; do
+        if kubectl exec -n "$NAMESPACE" "$SHELL_POD" -- test -f "$RESULTS_ROOT/$m/$f" 2>/dev/null; then
+          if kubectl exec -n "$NAMESPACE" "$SHELL_POD" -- gzip -c "$RESULTS_ROOT/$m/$f" > "$tmp/f.gz" \
+               && gunzip -t "$tmp/f.gz"; then
+            gunzip -c "$tmp/f.gz" > "$dest/$f"
+          else
+            echo "FAIL $m/$f"; fail=$((fail+1))
+          fi
+        fi
+      done
+      echo "$m: $got run(s) fetched, $kept already here -> Runs/k8s/$m"
+    done
+    rm -rf "$tmp"
+    if [[ "$fail" -gt 0 ]]; then
+      echo "$fail transfer(s) failed; run ./malusctl fetch again to get the rest." >&2
+      exit 1
+    fi
+    ;;
+  ""|-h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

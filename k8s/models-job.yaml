@@ -1,0 +1,89 @@
+# The model cache without a GPU: list what is there, download models ahead of
+# time, or remove one. No GPU is requested, so it schedules at once instead of
+# queueing behind real work.
+#
+#   ./malusctl models                     what is cached, and disk left
+#   ./malusctl pull qwen3:8b gemma3:27b   download, nothing else
+#   ./malusctl rm-model gemma3:27b        remove one model
+#
+# malusctl fills in the ACTION (list, pull or rm) and MODELS placeholders.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: malus-models-
+  labels:
+    app: malus-models
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: malus-models
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: models
+          image: ollama/ollama:latest
+          env:
+            - name: MALUS_ACTION
+              value: "__ACTION__"
+            - name: MALUS_MODELS
+              value: "__MODELS__"
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -u
+              ollama serve >/tmp/ollama.log 2>&1 &
+              server=$!
+              for i in $(seq 1 60); do
+                ollama list >/dev/null 2>&1 && break
+                sleep 1
+              done
+              status=0
+              for model in $MALUS_MODELS; do
+                case "$MALUS_ACTION" in
+                  pull) echo "=== pulling $model ==="; ollama pull "$model" || status=1 ;;
+                  rm)   echo "=== removing $model ==="; ollama rm "$model" || status=1 ;;
+                esac
+              done
+              echo
+              echo "=== models in the cache ==="
+              ollama list
+              echo
+              echo "=== disk on the models claim ==="
+              df -h /root/.ollama
+              echo
+              echo "=== leftover partial downloads ==="
+              find /root/.ollama/models/blobs -name "*-partial*" 2>/dev/null | sed 's/^/    /'
+              kill "$server" 2>/dev/null || true
+              wait "$server" 2>/dev/null || true
+              exit "$status"
+          resources:
+            # limits == requests: the namespace caps limit/request at 1.2
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+              ephemeral-storage: "2Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+              ephemeral-storage: "2Gi"
+          volumeMounts:
+            - name: models
+              mountPath: /root/.ollama
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: malus-models
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nautilus.io/csu-tide
+                    operator: Exists
+      tolerations:
+        - key: nautilus.io/reservation
+          operator: Equal
+          value: csu-tide
+          effect: NoSchedule

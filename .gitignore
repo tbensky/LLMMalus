@@ -5,3 +5,5 @@ __pycache__/
 # local secrets, e.g. a file holding LLM_API_KEY
 .env
 .env.*
+# the Job ./malusctl is following
+.malusctl-job
