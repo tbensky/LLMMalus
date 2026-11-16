@@ -15,7 +15,6 @@ from __future__ import annotations
 import csv
 import json
 import math
-import statistics
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -24,9 +23,6 @@ from typing import Any
 
 from .apparatus import Apparatus, ApparatusError
 from .notebook import Notebook
-
-MAX_SAMPLES = 20
-
 
 @dataclass
 class ToolResult:
@@ -43,33 +39,29 @@ class LabState:
     notebook: Notebook
     folder: Path | None = None
     call: int = 0                  # current model call, set by the loop
-    readings: int = 0              # detector readings taken (each sample counts)
+    readings: int = 0              # read_voltage calls (one detector reading each)
     knob_moves: int = 0
-    # Every read_voltage result, so plot can draw only data actually taken.
+    # Every read_voltage result, so the data check can trace plotted points.
+    # "mean" is the single reading (the data check also reads older runs,
+    # where it was an average).
     measurements: list[dict[str, Any]] = field(default_factory=list)
     plots: list[dict[str, Any]] = field(default_factory=list)
     plot_checks: list[dict[str, Any]] = field(default_factory=list)  # audit of each plot
     _csv_started: bool = False
 
-    def log_measurement(self, settings: dict[str, float], values: list[float]) -> None:
-        self.measurements.append({
-            "call": self.call, "settings": dict(settings),
-            "mean": statistics.fmean(values), "samples": len(values),
-        })
+    def log_measurement(self, settings: dict[str, float], value: float) -> None:
+        self.measurements.append({"call": self.call, "settings": dict(settings),
+                                  "mean": value})
         if self.folder is None:
             return
-        path = self.folder / "measurements.csv"
         knob_names = list(settings)
-        with path.open("a", encoding="utf-8", newline="") as f:
+        with (self.folder / "measurements.csv").open("a", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             if not self._csv_started:
-                writer.writerow(["call", "time", *knob_names, "samples", "mean", "stdev"])
+                writer.writerow(["call", "time", *knob_names, "voltage"])
                 self._csv_started = True
-            mean = statistics.fmean(values)
-            stdev = statistics.stdev(values) if len(values) > 1 else ""
             writer.writerow([self.call, round(time.time(), 3),
-                             *[settings[k] for k in knob_names],
-                             len(values), mean, stdev])
+                             *[settings[k] for k in knob_names], value])
 
 
 class Tool(ABC):
@@ -101,83 +93,68 @@ def _settings_text(settings: dict[str, float]) -> str:
     return ", ".join(f"{k} = {_fmt(v)}" for k, v in settings.items())
 
 
-class SetKnobs(Tool):
-    name = "set_knobs"
+class SetKnob(Tool):
+    """Turn one knob: its name and the setting to turn it to."""
+
+    name = "set_knob"
 
     def __init__(self, apparatus: Apparatus):
+        self.names = [k.name for k in apparatus.knobs]
         knob_lines = " ".join(f"{k.name}: {k.description}" for k in apparatus.knobs)
         self.description = (
-            "Turn one or more knobs to new settings. Knobs you leave out stay "
-            f"where they are. {knob_lines}"
+            "Turn one knob to a new setting. The other knobs stay where they are. "
+            f"{knob_lines}"
         )
         self.parameters = {
             "type": "object",
             "properties": {
-                k.name: {"type": "number", "description": k.description}
-                for k in apparatus.knobs
+                "knob": {"type": "string", "enum": self.names,
+                         "description": f"Which knob to turn: {', '.join(self.names)}."},
+                "value": {"type": "number",
+                          "description": "The setting to turn it to."},
             },
+            "required": ["knob", "value"],
         }
 
     def run(self, state: LabState, args: dict[str, Any]) -> ToolResult:
-        requested = {k: v for k, v in args.items() if v is not None}
-        if not requested:
-            names = ", ".join(k.name for k in state.apparatus.knobs)
-            return ToolResult(f"No knob was given. Name at least one of {names}.")
-        problems = []
-        for name, value in requested.items():
-            try:
-                state.apparatus.set_knob(str(name), value)
-                state.knob_moves += 1
-            except ApparatusError as exc:
-                problems.append(str(exc))
+        knob = str(args.get("knob") or "").strip().upper()
+        if knob not in self.names:
+            return ToolResult(f"Name the knob to turn: one of {', '.join(self.names)}.")
+        if args.get("value") is None:
+            return ToolResult(f"Give the setting to turn knob {knob} to.")
+        try:
+            state.apparatus.set_knob(knob, args["value"])
+        except ApparatusError as exc:
+            settings = state.apparatus.get_knobs()
+            return ToolResult(f"{exc} Knobs now: {_settings_text(settings)}.",
+                              data={"settings": settings, "problems": [str(exc)]})
+        state.knob_moves += 1
         settings = state.apparatus.get_knobs()
-        text = f"Knobs now: {_settings_text(settings)}."
-        if problems:
-            text = " ".join(problems) + " " + text
-        return ToolResult(text, data={"settings": settings, "problems": problems})
+        return ToolResult(f"Knobs now: {_settings_text(settings)}.",
+                          data={"settings": settings, "problems": []})
 
 
 class ReadVoltage(Tool):
+    """One reading of the voltage at the current settings."""
+
     name = "read_voltage"
+    parameters = {"type": "object", "properties": {}}
 
     def __init__(self, apparatus: Apparatus):
-        self.description = (
-            f"Read the output {apparatus.signal_name} at the current knob settings. "
-            f"Optionally average several readings with 'samples' (1 to {MAX_SAMPLES})."
-        )
-        self.parameters = {
-            "type": "object",
-            "properties": {
-                "samples": {
-                    "type": "integer",
-                    "description": f"Number of readings to average, 1 to {MAX_SAMPLES} (default 1).",
-                }
-            },
-        }
+        self.description = (f"Read the output {apparatus.signal_name} at the current knob "
+                            "settings.")
 
     def run(self, state: LabState, args: dict[str, Any]) -> ToolResult:
-        try:
-            samples = int(args.get("samples") or 1)
-        except (TypeError, ValueError):
-            samples = 1
-        samples = max(1, min(MAX_SAMPLES, samples))
         app = state.apparatus
         settings = app.get_knobs()
         try:
-            values = [app.read_signal() for _ in range(samples)]
+            value = app.read_signal()
         except ApparatusError as exc:
             return ToolResult(f"The reading failed: {exc}")
-        state.readings += samples
-        state.log_measurement(settings, values)
-        mean = statistics.fmean(values)
-        units = app.signal_units
-        if samples == 1:
-            text = f"At {_settings_text(settings)}: {mean:.4f} {units}"
-        else:
-            spread = statistics.stdev(values)
-            text = (f"At {_settings_text(settings)}: {mean:.4f} {units} "
-                    f"(mean of {samples} readings, standard deviation {spread:.4f} {units})")
-        return ToolResult(text, data={"settings": settings, "values": values, "mean": mean})
+        state.readings += 1
+        state.log_measurement(settings, value)
+        return ToolResult(f"At {_settings_text(settings)}: {value:.4f} {app.signal_units}",
+                          data={"settings": settings, "value": value, "mean": value})
 
 
 class WriteDown(Tool):
@@ -430,7 +407,7 @@ class Finish(Tool):
 
 
 def default_tools(apparatus: Apparatus, finish_description: str | None = None) -> list[Tool]:
-    return [SetKnobs(apparatus), ReadVoltage(apparatus), WriteDown(),
+    return [SetKnob(apparatus), ReadVoltage(apparatus), WriteDown(),
             ReadNotebook(), Plot(apparatus), Finish(finish_description)]
 
 

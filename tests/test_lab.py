@@ -143,7 +143,7 @@ class FakeModelServer:
 
     def check(self, payload):
         names = {t["function"]["name"] for t in payload.get("tools", [])}
-        if names != {"set_knobs", "read_voltage", "write_down", "read_notebook", "plot",
+        if names != {"set_knob", "read_voltage", "write_down", "read_notebook", "plot",
                      "finish"}:
             self.problems.append(f"tools offered: {sorted(names)}")
         messages = payload["messages"]
@@ -177,10 +177,15 @@ class FakeModelServer:
         return {"message": message, "prompt_eval_count": 10, "eval_count": 2}
 
 
+def turn(**settings):
+    """set_knob calls, one per knob, as a model would make them."""
+    return [("set_knob", {"knob": k, "value": v}) for k, v in settings.items()]
+
+
 EXPERIMENT = [
-    ("tools", [("set_knobs", {"A": 100, "B": 0, "C": 0})]),
-    ("tools", [("read_voltage", {"samples": 3})]),
-    ("tools", [("set_knobs", {"C": 90}), ("read_voltage", {})]),
+    ("tools", turn(A=100, B=0, C=0)),
+    ("tools", [("read_voltage", {})]),
+    ("tools", turn(C=90) + [("read_voltage", {})]),
     ("tools", [("write_down", {"text": "Full at C=B, zero 90 degrees apart."})]),
     ("tools", [("read_notebook", {})]),
     ("tools", [("finish", {"conclusion": "V goes as A times cos squared of C - B",
@@ -213,17 +218,18 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(summary["status"], "finished")
         self.assertTrue(summary["discovered"])
         self.assertEqual(summary["model_calls"], 6)
-        self.assertEqual(summary["readings"], 4)                # 3 samples + 1
+        self.assertEqual(summary["readings"], 2)                # one reading per call
         self.assertEqual(summary["notebook_entries"], 1)
         # what the model was shown, in order
         tool_texts = [m["content"] for m in server.requests[-1]["messages"] if m["role"] == "tool"]
         self.assertIn("Knobs now: A = 100, B = 0, C = 0.", tool_texts[0])
-        self.assertIn("mean of 3 readings", tool_texts[1])
+        self.assertRegex(tool_texts[3], r"^At A = 100, B = 0, C = 0: \d\.\d{4} V$")
+        self.assertRegex(tool_texts[4], r"^Knobs now: A = 100, B = 0, C = 90\.$")
         self.assertIn("Full at C=B", tool_texts[-1])           # read_notebook
         for name in ("transcript.jsonl", "measurements.csv", "notebook.md", "summary.json"):
             self.assertTrue((self.folder / name).exists(), name)
         rows = (self.folder / "measurements.csv").read_text().splitlines()
-        self.assertEqual(rows[0], "call,time,A,B,C,samples,mean,stdev")
+        self.assertEqual(rows[0], "call,time,A,B,C,voltage")
         self.assertEqual(len(rows), 3)
 
     def test_a_full_experiment_ollama_style(self):
@@ -245,13 +251,15 @@ class SessionTests(unittest.TestCase):
         self.assertEqual((summary["status"], summary["model_calls"]), ("no_tool_calls", 3))
 
     def test_bad_arguments_and_unknown_tools_are_answered_not_fatal(self):
-        script = [("tools", [("set_knobs", {"A": 500})]),
+        script = [("tools", [("set_knob", {"knob": "A", "value": 500})]),
+                  ("tools", [("set_knob", {"knob": "D", "value": 5})]),
                   ("tools", [("measure_everything", {})]),
                   ("tools", [("finish", {"conclusion": "x", "formula": "import os"})])]
         summary, server = self.session("openai", script)
         texts = [m["content"] for m in server.requests[-1]["messages"] if m["role"] == "tool"]
         self.assertIn("cannot go above 100", texts[0])
-        self.assertIn("There is no tool called 'measure_everything'", texts[1])
+        self.assertIn("Name the knob to turn: one of A, B, C.", texts[1])
+        self.assertIn("There is no tool called 'measure_everything'", texts[2])
         self.assertEqual(summary["status"], "finished")
         self.assertIn("error", summary["evaluation"])
 
@@ -278,9 +286,12 @@ class TextFallbackTests(unittest.TestCase):
     def test_leaked_gpt_oss_syntax(self):
         self.assertEqual(self.names(" to=functions.read_voltage ...<|call|>"),
                          [("read_voltage", {})])
-        self.assertEqual(self.names('to=functions.set_knobs <|message|>{"A": 40}<|call|>'),
-                         [("set_knobs", {"A": 40})])
+        self.assertEqual(
+            self.names('to=functions.set_knob <|message|>{"knob": "A", "value": 40}<|call|>'),
+            [("set_knob", {"knob": "A", "value": 40})])
         self.assertEqual(self.names("to=functions.set_knobsp?<|call|>"), [])   # no such tool
+        self.assertEqual(self.names('{"knob": "B", "value": 30}'),             # bare arguments
+                         [("set_knob", {"knob": "B", "value": 30})])
         self.assertEqual(self.names("to=functions.write_down <|call|>"), [])   # needs text
 
     def test_prose_is_not_mistaken_for_a_call(self):
@@ -291,8 +302,7 @@ class TextFallbackTests(unittest.TestCase):
 
 def sweep(knob, values, fixed):
     """Script steps that set each value and read it, one turn each."""
-    return [("tools", [("set_knobs", {**fixed, knob: v}), ("read_voltage", {})])
-            for v in values]
+    return [("tools", turn(**{**fixed, knob: v}) + [("read_voltage", {})]) for v in values]
 
 
 # Idealized values for a C sweep: what cos^2 predicts, not what was read
@@ -317,8 +327,8 @@ def real_points(earlier_reads, knob, values, fixed, seed=1):
     return points
 
 DISCOVER = [
-    ("tools", [("set_knobs", {"A": 100, "B": 0, "C": 0}), ("read_voltage", {})]),
-    ("tools", [("set_knobs", {"C": 90}), ("read_voltage", {})]),
+    ("tools", turn(A=100, B=0, C=0) + [("read_voltage", {})]),
+    ("tools", turn(C=90) + [("read_voltage", {})]),
 ]
 FIRST_GUESS = "0.05*A*cos(radians(C - B))**2"
 
@@ -422,7 +432,8 @@ class PlotAndFitTests(unittest.TestCase):
         state = LabState(apparatus=bench, notebook=Notebook(), folder=self.folder)
         tools = Toolbox(default_tools(bench))
         for c in (0, 45, 90):
-            tools.run(state, "set_knobs", {"A": 100, "B": 0, "C": c})
+            for knob, value in {"A": 100, "B": 0, "C": c}.items():
+                tools.run(state, "set_knob", {"knob": knob, "value": value})
             tools.run(state, "read_voltage", {})
         real = [[c, round(m["mean"], 4)] for c, m in zip((0, 45, 90), state.measurements)]
         result = tools.run(state, "plot", {"points": real + [[135, 2.6]],   # 2.6 never read
