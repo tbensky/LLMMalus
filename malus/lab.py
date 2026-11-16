@@ -367,6 +367,9 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
         **(extra or {}),
         "evaluation": evaluation,
         "initial_evaluation": initial_evaluation,
+        # Exactly what the model was told about each tool, so runs made with
+        # different tool wording can be told apart.
+        "tool_definitions": [s["function"] for s in toolbox.schemas()],
     }
     if folder is not None:
         (folder / "summary.json").write_text(

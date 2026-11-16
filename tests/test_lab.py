@@ -230,6 +230,11 @@ class SessionTests(unittest.TestCase):
             self.assertTrue((self.folder / name).exists(), name)
         rows = (self.folder / "measurements.csv").read_text().splitlines()
         self.assertEqual(rows[0], "call,time,A,B,C,voltage")
+        tools = {t["name"]: t for t in summary["tool_definitions"]}
+        self.assertEqual(set(tools), {"set_knob", "read_voltage", "write_down",
+                                      "read_notebook", "plot", "finish"})
+        self.assertIn("[[1, 2.3], [2, 4.1]]",
+                      tools["plot"]["parameters"]["properties"]["points"]["description"])
         self.assertEqual(len(rows), 3)
 
     def test_a_full_experiment_ollama_style(self):
