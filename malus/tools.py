@@ -166,7 +166,9 @@ class WriteDown(Tool):
     name = "write_down"
     description = (
         "Write something in your lab notebook: data, observations, ideas, plans, "
-        "anything you want to keep. Only you read it."
+        "anything you want to keep. The text goes into your lab notebook verbatim, with "
+        "no processing, for your own personal benefit. No action will be taken on any "
+        "text you write down."
     )
     parameters = {
         "type": "object",

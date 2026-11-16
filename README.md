@@ -48,12 +48,6 @@ writes as text instead are accepted too and counted in `text_tool_calls`: a call
 written out as JSON, just a tool's arguments (gpt-oss handed in `finish`'s
 `{"conclusion": ..., "formula": ...}` this way), or gpt-oss's own
 `to=functions.read_voltage` syntax leaking through the host.
-DeepSeek's own call markup can leak too, folding a second call into the
-first one's arguments: run 005 sent `write_down` with
-`{"text": "...<｜DSML｜ invoke name=\"set_knob\">", "knob": "B", "value": 0}`,
-so the notebook got the markup and the knob never moved. Such a call is split
-back into the two calls the model made (the note, cut where the markup
-starts, and the knob move) and counted in `leaked_tool_calls`.
 
 When the host errors (HTTP 429 or 5xx, or a timeout) a model call is retried up to
 8 times, waiting 2, 4, 8, 16 and then 30 seconds (`--retries`). After the last
@@ -65,7 +59,7 @@ attempt the run ends with status `error`, which `runs_summary.json` leaves out.
 | --- | --- |
 | `set_knob` | Turn one knob: `knob` (A, B or C) and `value`. A is limited to 0..100; B and C take any angle in degrees. Replies only "Ok. Knob B has been set.", with no positions: the model keeps track of its settings itself. |
 | `read_voltage` | Read the voltage at the current settings: one reading (5 mV of noise), no averaging, and only the number (e.g. `0.9487 V`): keeping track of the knob settings is up to the model. To average, it has to call it again. |
-| `write_down` | Add an entry to the lab notebook. |
+| `write_down` | Add an entry to the lab notebook. Its description says the text goes in verbatim, unprocessed, and that no action is taken on anything written down. |
 | `read_notebook` | Read back every notebook entry. |
 | `plot` | Graph a list of (x, y) points it supplies itself, like making a plot in a spreadsheet, optionally with its own curve written in terms of x. Saves a PNG and answers only "Plot N saved."; it computes nothing for the model. |
 | `finish` | Announce it is done, with a written conclusion and the law as a Python expression in A, B and C. Its description also asks for systematic data and a hand fit with `plot` before finishing (`prompts/finish_tool.txt`). |
