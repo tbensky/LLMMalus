@@ -26,7 +26,7 @@ from typing import Any, Callable
 from .apparatus import Apparatus
 from .audit import audit_points, needs_correction, problem_lines
 from .evaluate import FormulaError, collect_holdout, compile_formula, score_formula
-from .llm import ChatClient, LLMError, ToolCall, extract_text_tool_calls
+from .llm import ChatClient, LLMError, ToolCall, extract_text_tool_calls, split_leaked_calls
 from .notebook import Notebook
 from .tools import LabState, ToolResult, Toolbox, default_tools
 
@@ -199,6 +199,7 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
     usage = Counter()
     idle = 0
     text_fallbacks = 0
+    leaked_calls = 0
     calls_made = 0
     fit_state = "not_reached" if config.fit_stage else "off"
     initial: dict[str, Any] = {}      # the law at the model's first finish
@@ -227,6 +228,10 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
             break
         usage.update(reply.usage)
         calls = list(reply.tool_calls)
+        if calls:
+            split = split_leaked_calls(calls, toolbox.schemas())
+            leaked_calls += len(split) - len(calls)
+            calls = split
         from_text = False
         if not calls and reply.text:
             calls = extract_text_tool_calls(reply.text, toolbox.schemas())
@@ -309,7 +314,8 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
                              data=result.data)
             say(f"[{call_number}] {tool_call.name}({json.dumps(tool_call.arguments)}) -> "
                 f"{_short(result.text, 200)}")
-            if from_text:
+            if from_text or tool_call.from_text:
+                # no tool-call id to answer: the result goes back as text
                 text_results.append(f"Result of {tool_call.name}: {result.text}")
             else:
                 messages.append(client.tool_result_message(tool_call, result.text))
@@ -387,6 +393,8 @@ def run_session(client: ChatClient, apparatus: Apparatus, *, system_prompt: str,
         "knob_moves": state.knob_moves,
         "notebook_entries": len(notebook.entries),
         "text_tool_calls": text_fallbacks,
+        # calls recovered from inside another call's arguments (split_leaked_calls)
+        "leaked_tool_calls": leaked_calls,
         "usage": dict(usage),
         "elapsed_s": round(time.monotonic() - started, 1),
         "error": error,

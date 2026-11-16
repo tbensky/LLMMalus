@@ -265,6 +265,25 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(summary["discovered"])                 # wrong law
         self.assertIn("Result of read_voltage", server.requests[1]["messages"][-1]["content"])
 
+    def test_a_leaked_knob_move_is_carried_out(self):
+        """The set_knob deepseek folded into write_down really turns the knob."""
+        leak = ("Plan.\n\n<\uff5cDSML\uff5c calls>\n<\uff5cDSML\uff5c invoke "
+                'name="set_knob">\n')
+        script = [("tools", turn(A=100, B=60, C=0)),
+                  ("tools", [("write_down", {"text": leak, "knob": "B", "value": 0})]),
+                  ("tools", [("read_voltage", {})]),
+                  ("tools", [("read_notebook", {})])]
+        summary, server = self.session("openai", script, max_calls=5)
+        self.assertEqual(summary["leaked_tool_calls"], 1)
+        self.assertEqual(self.folder.joinpath("measurements.csv").read_text().splitlines()[1]
+                         .split(",")[2:5], ["100.0", "0.0", "0.0"])    # B really is 0
+        messages = server.requests[-1]["messages"]
+        self.assertIn("Result of set_knob: Ok. Knob B has been set.",
+                      [m["content"] for m in messages if m["role"] == "user"])
+        notebook = [m["content"] for m in messages if m["role"] == "tool"][-1]
+        self.assertIn("Plan.", notebook)
+        self.assertNotIn("DSML", notebook)
+
     def test_a_model_that_never_uses_tools_is_stopped(self):
         summary, _ = self.session("openai", [("text", "Hmm.")] * 10, max_idle=3)
         self.assertEqual((summary["status"], summary["model_calls"]), ("no_tool_calls", 3))
@@ -328,6 +347,24 @@ class TextFallbackTests(unittest.TestCase):
         self.assertEqual(self.names('{"knob": "B", "value": 30}'),             # bare arguments
                          [("set_knob", {"knob": "B", "value": 30})])
         self.assertEqual(self.names("to=functions.write_down <|call|>"), [])   # needs text
+
+    def test_a_call_leaked_into_another_calls_arguments_is_split_out(self):
+        """deepseek-v4-flash run 005: a set_knob folded into write_down's arguments."""
+        from malus.llm import ToolCall, split_leaked_calls
+        from malus.tools import parse_arguments
+        raw = ('{"text": "Let me check whether C matters.\\n\\n<\uff5cDSML\uff5c calls>\\n'
+               '<\uff5cDSML\uff5c invoke name=\\"set_knob\\">\\n", "knob": "B", "value": 0}')
+        args, error = parse_arguments(raw)
+        self.assertIsNone(error)
+        calls = split_leaked_calls([ToolCall("c1", "write_down", args, raw)], self.schemas)
+        self.assertEqual([(c.name, c.arguments, c.from_text) for c in calls], [
+            ("write_down", {"text": "Let me check whether C matters."}, False),
+            ("set_knob", {"knob": "B", "value": 0}, True)])
+        # extra keys without the markup, or markup without matching keys: left alone
+        for args in ({"text": "plain", "knob": "B", "value": 0},
+                     {"text": '<\uff5cDSML\uff5c invoke name="set_knob">', "colour": 1}):
+            call = ToolCall("c1", "write_down", args, None)
+            self.assertEqual(split_leaked_calls([call], self.schemas), [call])
 
     def test_prose_is_not_mistaken_for_a_call(self):
         for text in ('Next I will set {"A": 50}.', "{}", 'Try {"samples": 5}',

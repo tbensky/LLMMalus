@@ -164,6 +164,49 @@ def extract_text_tool_calls(text: str, tools: list[dict[str, Any]]) -> list[Tool
     return calls
 
 
+# DeepSeek's own tool-call markup, when the host fails to parse a second call
+# and folds it into the first one's arguments. deepseek-v4-flash run 005 sent
+# write_down with {"text": "...<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"set_knob\">\n",
+# "knob": "B", "value": 0}: the notebook got the markup and the knob never moved.
+_DSML_MARK_RE = re.compile(r"<[｜|]\s*DSML\s*[｜|]")
+_DSML_INVOKE_RE = re.compile(r'<[｜|]\s*DSML\s*[｜|]\s*invoke\s+name=\\?"([A-Za-z_]\w*)')
+
+
+def split_leaked_calls(calls: list[ToolCall], tools: list[dict[str, Any]]) -> list[ToolCall]:
+    """Separate a tool call that leaked into another call's arguments.
+
+    Recognized when a call has arguments its tool does not take, a string
+    argument contains DeepSeek's call markup naming another tool, and the
+    extra arguments are exactly what that tool takes (all its required ones,
+    nothing it does not know). The first call keeps its own arguments, its
+    text cut where the markup starts; the leaked call follows it, marked
+    from_text. Anything else is left alone.
+    """
+    specs = _tool_specs(tools)
+    out: list[ToolCall] = []
+    for call in calls:
+        args = call.arguments
+        if not isinstance(args, dict) or call.name not in specs:
+            out.append(call)
+            continue
+        own_names = specs[call.name][1]
+        extra = {k: v for k, v in args.items() if k not in own_names}
+        marked = [v for v in args.values() if isinstance(v, str) and _DSML_MARK_RE.search(v)]
+        names = [m.group(1) for text in marked for m in _DSML_INVOKE_RE.finditer(text)]
+        target = names[-1] if names else None
+        if not extra or target not in specs or not (
+                specs[target][0] <= set(extra) <= specs[target][1]):
+            out.append(call)
+            continue
+        own = {k: (_DSML_MARK_RE.split(v, 1)[0].rstrip() if isinstance(v, str) else v)
+               for k, v in args.items() if k in own_names}
+        out.append(ToolCall(id=call.id, name=call.name, arguments=own,
+                            raw_arguments=call.raw_arguments))
+        out.append(ToolCall(id=f"{call.id}_leaked", name=target, arguments=extra,
+                            raw_arguments=extra, from_text=True))
+    return out
+
+
 class ChatClient:
     provider = "base"
 
