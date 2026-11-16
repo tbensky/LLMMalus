@@ -195,10 +195,10 @@ class Plot(Tool):
 
     Like a student typing data into a spreadsheet: the model decides what
     goes on each axis and sends the numbers itself, and may add a curve
-    written in terms of x with constants it chose. It gets back a table of
-    each point next to its curve's value: a text model cannot look at the
-    PNG, so the table is how it "sees" whether the curve goes through the
-    points.
+    written in terms of x with constants it chose. It gets back only
+    "Plot N saved.": no curve values, differences or RMS. A text model cannot
+    look at the PNG, so judging whether its curve goes through its points
+    means working that out itself, from its own data and its own curve.
 
     Because the model types the numbers, a plot could show values it never
     measured, a real reading moved to the wrong settings, or idealized values
@@ -212,7 +212,6 @@ class Plot(Tool):
 
     name = "plot"
     MAX_POINTS = 500
-    MAX_ROWS = 50
     CURVE_POINTS = 241
 
     def __init__(self, apparatus: Apparatus):
@@ -221,8 +220,7 @@ class Plot(Tool):
         self.description = (
             "Make an X/Y graph from data you supply, and optionally draw your own curve "
             "through it, the way you would make a plot in a spreadsheet. You choose what goes "
-            "on each axis and give the points yourself. The graph is saved with your lab work, "
-            "and you get back a table of each point next to your curve's value at that x."
+            "on each axis and give the points yourself. The graph is saved with your lab work."
         )
         self.parameters = {
             "type": "object",
@@ -230,7 +228,7 @@ class Plot(Tool):
                 "points": {
                     "type": "array",
                     "description": ("The data to plot, as a list of [x, y] pairs, for example "
-                                    "[[0, 4.99], [15, 4.66], [30, 3.75]]."),
+                                    "[[1, 2.3], [2, 4.1]]."),
                     "items": {"type": "array", "items": {"type": "number"},
                               "minItems": 2, "maxItems": 2},
                 },
@@ -335,28 +333,10 @@ class Plot(Tool):
                 f.write(json.dumps({**record, "data": rows, "check": check["points"]},
                                    ensure_ascii=False) + "\n")
 
-        # Show 0 instead of floating-point dust such as -4.4e-16, judged
-        # against the size of the data itself.
-        scale = max(abs(y) for _, y in points) or 1.0
-
-        def num(value: float, signed: bool = False) -> str:
-            if abs(value) < scale * 1e-9:
-                value = 0.0
-            return f"{value:+.4g}" if signed else f"{value:.4g}"
-
-        lines = [f"Plot {number}: {len(points)} points, {y_label} against {x_label}"
-                 + (", with your curve." if law else ", data only.")]
-        if law is not None:
-            for x, y, c in rows[: self.MAX_ROWS]:
-                lines.append(f"  x = {x:g}: y = {num(y)}, your curve {num(c)}, "
-                             f"difference {num(y - c, signed=True)}")
-            if len(rows) > self.MAX_ROWS:
-                lines.append(f"  ... and {len(rows) - self.MAX_ROWS} more points")
-            lines.append("Root-mean-square difference between your curve and the data: "
-                         f"{num(rms)}")
-        if len(points) < 3:
-            lines.append("Only a few points; a convincing plot usually needs more.")
-        return ToolResult("\n".join(lines), data=record)
+        # Nothing computed for the model: no curve values, no differences, no
+        # RMS. Comparing its curve with its data is its own work. (The record
+        # keeps the RMS and the data check for the summary.)
+        return ToolResult(f"Plot {number} saved.", data=record)
 
 
 # What the model reads about finish. The command line replaces it with

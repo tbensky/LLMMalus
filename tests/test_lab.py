@@ -391,16 +391,14 @@ class PlotAndFitTests(unittest.TestCase):
         self.assertEqual(summary["readings_after_fit_request"], 7)
         self.assertTrue(any("Before you finish" in t for t in shown))        # the request
         self.assertTrue(any(t.startswith("Before finishing") for t in shown))  # the reminder
-        bad_fit, good_fit = [t for t in shown if t.startswith("Plot ")]
-        self.assertIn("Plot 2: 7 points, y against C (deg), with your curve.", good_fit)
-        y30 = data[1][1]
-        self.assertIn(f"x = 30: y = {y30:.4g}, your curve 3.75, difference {y30 - 3.75:+.4g}",
-                      good_fit)
-        self.assertIn(f"x = 30: y = {y30:.4g}, your curve 3, difference {y30 - 3:+.4g}", bad_fit)
+        # plot does no arithmetic for the model: just a receipt
+        self.assertEqual([t for t in shown if t.startswith("Plot ")],
+                         ["Plot 1 saved.", "Plot 2 saved."])
         self.assertEqual(summary["data_check"], "clean")
         self.assertEqual(summary["final_plot"]["clean"], 7)
-        rms = lambda text: float(text.rsplit(": ", 1)[1].split()[0])   # noqa: E731
-        self.assertGreater(rms(bad_fit), 10 * rms(good_fit))
+        saved = [json.loads(line) for line in
+                 (self.folder / "plots" / "plots.jsonl").read_text().splitlines()]
+        self.assertGreater(saved[0]["rms"], 10 * saved[1]["rms"])   # kept for the summary
         for name in summary["plot_files"]:
             self.assertTrue((self.folder / "plots" / name).exists(), name)
         self.assertEqual(len((self.folder / "plots" / "plots.jsonl").read_text().splitlines()), 2)
@@ -434,9 +432,8 @@ class PlotAndFitTests(unittest.TestCase):
         self.assertIn("must be an [x, y] pair", shown[1])
         self.assertIn("must be two numbers", shown[2])
         self.assertIn("written in terms of x", shown[3])
-        self.assertIn("Plot 1: 3 points, y against x, data only.", shown[4])   # {"x","y"} form
-        self.assertIn("x = 0: y = 1, your curve 1, difference +0", shown[5])  # sorted by x
-        self.assertIn("Root-mean-square difference between your curve and the data: 0", shown[5])
+        self.assertEqual(shown[4], "Plot 1 saved.")                         # {"x","y"} form
+        self.assertEqual(shown[5], "Plot 2 saved.")
         self.assertEqual(summary["plots"], 2)
 
     def test_plotted_points_are_checked_against_real_readings(self):

@@ -82,9 +82,13 @@ fitting) and record the constants. Its law at the first `finish` is recorded
   optionally a curve: a Python expression in `x` with its hand-picked constants,
   e.g. `3.7*cos(radians(x + 25))**2`. It decides what goes on each axis, so it can
   plot voltage against a knob, against B − C, or anything it derives.
-- **It gets a table back.** A text-only model cannot look at the PNG, so `plot`
-  answers with each point next to the curve's value and the RMS difference.
-  That table is its view of the graph when it adjusts its constants.
+- **It gets nothing back but a receipt.** `plot` answers only "Plot 2 saved.":
+  no curve values, no differences, no RMS. A text-only model cannot look at the
+  PNG, so to judge its fit it has to work out its curve at its own points and
+  compare. (The harness still records each plot's RMS for the summary.) The
+  example in `plot`'s description is a neutral `[[1, 2.3], [2, 4.1]]`; until
+  this change it was 5·cos² at 0, 15 and 30 degrees, which every run before it
+  saw.
 - **Its data is checked** (`malus/audit.py`). Because the model types the
   numbers, a plot could show values it never measured, a real reading moved to
   the wrong settings, or idealized values that sit on its curve. The model never
